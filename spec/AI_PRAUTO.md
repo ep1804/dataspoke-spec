@@ -1,20 +1,15 @@
 # PRauto: Autonomous PR Worker
 
-> **Document Status**: Specification v0.8 (2026-08-23)
 > This document specifies "prauto" -- an autonomous PR worker that monitors GitHub issues,
 > writes code via a headless coding-agent CLI, and submits pull requests. Prauto extends the AI
 > scaffold (`spec/AI_SCAFFOLD.md`) with unattended, scheduled development automation.
 
-> **Architecture note (v0.8)**: Prauto is re-specified as a **loop master + contract** split.
-> The *contract* (labels, phase state machine, the evidence-based plan gate, generator ≠ reviewer,
-> deploy ordering, GitHub-as-SSOT, the security model) is substrate-independent and durable. The
-> *loop* (scheduling, agent selection, worker dispatch, quota probing) was previously a
-> hand-rolled bash harness (`.prauto/heartbeat.sh` + `lib/*.sh`), removed in v0.8. It is replaced
-> by a **loop master** — a scheduler-triggered meta-agent that wakes on a cadence, picks a coding
-> agent (Claude Code, falling back to Codex), and spawns worker/reviewer processes. The contract
-> below
-> is written agent-agnostically; a reference loop-master binding (Hermes Agent) is in
-> [Meta-Agent Loop Bindings](#meta-agent-loop-bindings).
+> **Architecture**: Prauto separates a durable, agent-agnostic *contract* from a deterministic
+> *executor* and a thin *scheduler*. The contract defines labels, phase state, the evidence-based
+> plan gate, generator ≠ reviewer, deploy ordering, GitHub-as-SSOT, and the security model. The
+> executor (`.prauto/heartbeat.sh` with `.prauto/lib/*.sh`) owns each tick's lock, configuration,
+> agent probes and selection, dispatch, and finalization. A scheduler supplies cadence only; the
+> Hermes binding is one supported scheduler integration.
 
 ---
 
@@ -22,7 +17,7 @@
 
 1. [Overview](#overview)
 2. [Worker Identity and Configuration](#worker-identity-and-configuration)
-3. [Loop Master Cycle](#loop-master-cycle)
+3. [Executor Cycle](#executor-cycle)
 4. [Agent Availability](#agent-availability)
 5. [Job State Machine](#job-state-machine)
 6. [Issue Discovery Protocol](#issue-discovery-protocol)
@@ -32,7 +27,7 @@
 10. [Write Idempotency](#write-idempotency)
 11. [Security Model](#security-model)
 12. [Integration with AI Scaffold](#integration-with-ai-scaffold)
-13. [Meta-Agent Loop Bindings](#meta-agent-loop-bindings)
+13. [Executor and Scheduler](#executor-and-scheduler)
 
 ---
 
@@ -51,16 +46,18 @@ Two layers, with different lifespans and owners:
 - **Contract** — GitHub labels, the phase state machine, the evidence-based plan gate, the
   generator ≠ reviewer rule, deploy ordering, and the security model. This is the part that
   survives any re-implementation; it is specified here.
-- **Loop** — the scheduler trigger, agent selection, subagent dispatch, and quota probing. This
-  is provided by a **loop master**; a reference binding is described in
-  [Meta-Agent Loop Bindings](#meta-agent-loop-bindings).
+- **Executor** — performs a tick: concurrency control, configuration, agent availability and
+  selection, issue processing, worker/reviewer dispatch, and finalization.
+- **Scheduler** — supplies cadence and launches the executor. It does not select agents, inspect
+  quota, or perform issue work.
 
 ### Key design decisions
 
 - **GitHub as the SSOT for phase state**: Every wake derives its *next action* from **remote
   GitHub state** (labels, assignees, comments, review status). Phase, retry count, and plan
-  approval are re-derived from GitHub on each tick; the harness carries no in-memory phase state
-  between ticks. This is what makes the loop resumable across a fresh-process scheduler tick.
+  approval are re-derived from GitHub on each tick; the executor carries no in-memory phase state
+  between ticks. This is what makes the executor tick resumable across a fresh-process scheduler
+  launch.
 - **Continuity is not GitHub-only**: What a resume *continues* lives outside GitHub phase state.
   Work-product continuity flows through (1) committed checkpoints on the issue branch (pushed,
   linked to the issue, and posted as commit-link comments), (2) agent-native sessions (Claude
@@ -69,7 +66,7 @@ Two layers, with different lifespans and owners:
   *work product*.
 - **No uncommitted resume**: Each worker session starts fresh unless the agent-native quota
   resume path is active. The implementation prompt instructs the agent to check the branch for
-  existing committed work and continue from there. When the harness regains control, it
+  existing committed work and continue from there. When the executor regains control, it
   best-effort pushes committed checkpoints, links the branch to the issue, and posts idempotent
   issue comments containing commit links. Uncommitted work from a session that died mid-run is
   discarded with the worktree and is not resumed.
@@ -81,8 +78,8 @@ Two layers, with different lifespans and owners:
 
 Runs on a local developer machine. Requires: a coding-agent CLI with a logged-in account
 (Claude Code and/or Codex — both use login-based OAuth, not API tokens), the `gh` CLI
-(authenticated), `git`, and a scheduler capable of waking the loop master (cron, launchd, or a
-meta-agent scheduler). Docker/K8s/cloud deployments are out of scope for v1.
+(authenticated), `git`, and a scheduler capable of launching the executor. Docker/K8s/cloud
+deployments are out of scope for v1.
 
 ---
 
@@ -110,22 +107,22 @@ token, SSH key, and author identity — to resolve to that same account, or comm
 API actions end up attributed to different identities. See `.prauto/README.md` §Optional:
 Dedicated GitHub Bot Account for the setup.
 
-`PRAUTO_AGENT` selects the worker's coding agent: `claude` (default), `codex`, or `auto`
-(Claude first, Codex fallback — see [Agent Availability](#agent-availability)). Claude turn and
+`PRAUTO_AGENT` selects the worker's coding agent: `claude`, `codex`, or `auto` (the default;
+Claude first, Codex fallback — see [Agent Availability](#agent-availability)). Claude turn and
 budget configuration applies only to Claude invocations. Codex has neither the Claude
 `--max-turns` nor `--max-budget-usd` interface; the executor does not translate or pass those
 flags to Codex.
 
 ---
 
-## Loop Master Cycle
+## Executor Cycle
 
-Each wake runs seven steps in order. The loop master owns every step; the worker/reviewer
-subagents only run when dispatched in step 6.
+Each executor tick runs seven steps in order. Worker and reviewer agents run only when the
+executor dispatches them in step 6.
 
 1. **Concurrency gate** — exit if a worker subagent is already running or pending (a prior
-   tick's worker that is mid-run or waiting out a token reset). Enforced by the loop master's
-   live-subagent inventory plus a durable marker; see [Security Model](#security-model).
+   tick's worker that is mid-run or waiting out a token reset). Enforced by the executor's
+   durable PID lock; see [Security Model](#security-model).
 2. **Load config** — `config.env` + `config.local.env`.
 3. **Agent availability** — pick Claude Code, else Codex, else exit and post a
    quota-paused comment on WIP issues. See [Agent Availability](#agent-availability).
@@ -136,7 +133,7 @@ subagents only run when dispatched in step 6.
 6. **Dispatch** — one worker subagent per actionable issue (analysis, implementation,
    integration-fix), then a reviewer subagent over the worker's diff where the contract calls
    for adversarial review (implementation).
-7. **Finalize** — the loop master (not the worker) pushes, opens/updates PRs, posts test
+7. **Finalize** — the executor (not the worker) pushes, opens/updates PRs, posts test
    results, and swaps labels.
 
 **Claim-first, then process-all**: Step 4 counts open issues assigned to this worker (excluding
@@ -147,13 +144,13 @@ loops over all claimed issues.
 directory is never the working directory during worker invocations.
 
 **Cadence**: The user-specified interval (default 4 hours). The schedule is owned by the
-scheduler trigger (cron / launchd / meta-agent scheduler), not by `config.local.env`.
+scheduler binding, not by `config.local.env`.
 
 ---
 
 ## Agent Availability
 
-The loop master probes agent availability with a two-step check per candidate, in order:
+The executor probes agent availability with a two-step check per candidate, in order:
 
 1. **Claude Code**: `claude auth status` (checks a logged-in OAuth session), then a minimal
    one-turn dry-run (`claude -p "Reply with exactly: OK" --max-turns 1 --allowedTools ""`).
@@ -167,7 +164,7 @@ is `claude` or `codex`, only that agent is probed; `auto` probes Claude then Cod
 Outcomes:
 
 - An agent passes → it is selected for this wake.
-- Neither passes → the harness exits. If a WIP issue exists, post a "Paused" comment (with
+- Neither passes → the executor exits. If a WIP issue exists, post a "Paused" comment (with
   marker); the retry counter is not incremented. On the next wake with an agent available,
   post "Resumed" before continuing.
 
@@ -175,7 +172,7 @@ A dry-run timeout (network slowness) is **not** treated as exhausted — proceed
 
 ### Quota-pause and resume
 
-A worker that dies mid-run on a rate/session-limit exit pauses rather than fails: the harness
+A worker that dies mid-run on a rate/session-limit exit pauses rather than fails: the executor
 posts a pause marker carrying the session id, and the next wake resumes the SAME session on the
 SAME agent once quota resets. The marker:
 
@@ -209,7 +206,7 @@ Session identity is agent-native:
 
 | Agent | Fresh-session identity | Resume identity |
 |-------|------------------------|-----------------|
-| Claude Code | The harness generates a UUID and supplies it with Claude's `--session-id` option. | That UUID is supplied to Claude's `--resume` option. |
+| Claude Code | The executor generates a UUID and supplies it with Claude's `--session-id` option. | That UUID is supplied to Claude's `--resume` option. |
 | Codex | Codex creates the thread id. The executor captures `thread_id` from the `thread.started` JSONL event emitted by the fresh invocation. | That captured thread id is supplied to `codex exec resume`. |
 
 The executor persists the captured id before it can post a resumable quota marker. A Codex run
@@ -322,8 +319,8 @@ automatically ignore stale comments from previous attempts.
 
 ### Multi-phase execution model
 
-The worker is a headless coding-agent session (Claude Code or Codex), one per phase. The loop
-master supplies the phase's goal and bounds; the worker runs the phase's prompt template
+The worker is a headless coding-agent session (Claude Code or Codex), one per phase. The executor
+supplies the phase's goal and bounds; the worker runs the phase's prompt template
 (`.prauto/prompts/`) with the agent's native tool scoping.
 
 ### Agent execution adapters
@@ -337,7 +334,7 @@ shared command-line flags or output formats.
 - **Codex fresh sessions** run with `codex exec --json` and the workspace-write sandbox. Codex
   stdout is JSONL: the executor reads the `thread.started` event to persist its `thread_id`, then
   reads terminal events for the worker result and quota classification. It must not fabricate a
-  Codex id or pass a harness-generated id as though Codex had accepted it.
+  Codex id or pass an executor-generated id as though Codex had accepted it.
 - **Codex resumed sessions** run with `codex exec resume --json <thread-id> <prompt>`. Resume
   accepts the prior Codex identity; it does not accept Claude session, tool, turn, budget, or
   fresh-session sandbox flags. The executor uses the JSONL stream on a resumed run for result and
@@ -385,7 +382,7 @@ on the private `prauto/I-*` worktree branch only, never `master`, and are attrib
 via `--author`. Before integration or PR finalization, the parent requires the exact
 `PRAUTO_WORKFLOW_OUTCOME: COMPLETE` sentinel and a clean worktree. Progress is therefore durable
 per stage: a run that dies mid-workflow loses only the stage in flight, and a quota-pause resume
-re-enters a branch whose committed state matches the session's memory. The harness publishes
+re-enters a branch whose committed state matches the session's memory. The executor publishes
 checkpoint commits as soon as it regains control; these commits are unreviewed intermediate
 progress, and each published commit is recorded as an idempotent issue comment.
 
@@ -394,21 +391,20 @@ the branch holds a partial implementation. Prauto must not carry that forward to
 abandons the job ([Job completion and abandonment](#job-completion-and-abandonment)) rather than
 finalizing.
 
-### Loop-master-owned review gate
+### Executor-owned review gate
 
-In addition to the in-workflow per-stage review, the loop master runs a **final adversarial review
+In addition to the in-workflow per-stage review, the executor runs a **final adversarial review
 gate** over the worker's committed diff before the PR is opened: a fresh reviewer subagent — a
 separate context that has not seen the worker's session — reads the diff against
-`scaffold/roles/reviewer.md` and returns a verdict. This is the strengthening that a meta-agent
-loop makes cheap: the reviewer is a genuinely separate process, not an in-session subagent whose
-tool scope the parent whitelist failed to contain. A REVISE verdict feeds one fix pass; an ESCALATE
+`scaffold/roles/reviewer.md` and returns a verdict. The reviewer is a genuinely separate process,
+not the worker's session. A REVISE verdict feeds one fix pass; an ESCALATE
 abandons the job as above. The gate is mandatory for `implementation`; analysis, integration-fix,
 and pr-review do not re-open it.
 
-Deploys stay orchestrator-owned. Prauto's analysis phase never emits `k8s-helm` as a stage: that
+Deploys stay executor-owned. Prauto's analysis phase never emits `k8s-helm` as a stage: that
 stage would deploy under whatever its kubeconfig points at, ignoring the worker-cluster binding and
 the api-then-frontend ordering ([Branch image deploys](#branch-image-deploys)), and it carries no
-reviewer. All cluster mutation runs from the loop master against `$PRAUTO_DEV_ENV_FILE`.
+reviewer. All cluster mutation runs from the executor against `$PRAUTO_DEV_ENV_FILE`.
 
 ---
 
@@ -493,7 +489,7 @@ run would only re-prove it at far higher cost.
 
 ### Push and PR creation
 
-After implementation, the loop master (not the worker) pushes the branch, links it to the issue's
+After implementation, the executor (not the worker) pushes the branch, links it to the issue's
 Development section, posts commit-link comments for any unpublished commits, checks for an
 existing PR, and creates one if none exists (with `prauto:review` label, assignee, optional
 reviewer). The same checkpoint publication runs after worker-led review and integration-fix
@@ -511,10 +507,10 @@ make the PR actionable again.
 Prauto runs the unattended form of the protocol in [`TESTING.md`](TESTING.md), which is
 authoritative for layers, commands, and constraints. Stages run in order; each is skipped when
 the diff does not reach its layer. Each stage names its **actor**: the worker runs a stage from
-its prompt template inside the session's tool whitelist, while the loop master runs a stage
+its prompt template inside the session's tool whitelist, while the executor runs a stage
 directly and invokes the worker only for fix sessions.
 
-**Pre-flight gate** *(loop master)*: the health check in its
+**Pre-flight gate** *(executor)*: the health check in its
 [Provisioning](#provisioning) form — `--env-file $PRAUTO_DEV_ENV_FILE --keep-lock` — runs before
 any integration work. On exit 1, prauto provisions its own cluster and re-checks
 ([Provisioning](#provisioning)); the integration and E2E stages are **skipped, not failed** only
@@ -522,7 +518,7 @@ if provisioning fails. On exit 2 it reports the setup fault, provisions nothing,
 stages rather than failing the issue. An unprovisionable cluster is evidence about the
 infrastructure, not the branch, so failing it would burn retries against unrelated code.
 
-**Environment**: the loop master's integration and E2E stages source the worker's env file
+**Environment**: the executor's integration and E2E stages source the worker's env file
 (`$PRAUTO_DEV_ENV_FILE`, resolved under `$REPO_DIR`) via `set -a` (the file carries no `export`
 prefixes) and hold the dev-env lock at `$DATASPOKE_DEV_LOCK_URL`.
 
@@ -536,7 +532,7 @@ the four author-run gates of [`TESTING.md §CI Behavior`](TESTING.md#ci-behavior
 **Stage 2 -- Unit** *(worker)*: `uv run pytest tests/unit/`; frontend-touching work also runs
 `pnpm -C src/frontend test` (offline, mocked). Needs no cluster and no lock.
 
-**Stage 3 -- Integration fix loop (pre-push)** *(loop master; worker for fixes)*: after
+**Stage 3 -- Integration fix loop (pre-push)** *(executor; worker for fixes)*: after
 implementation, under the dev-env lock. A diff touching `src/{api,backend,shared}` deploys the
 branch's API first ([Branch image deploys](#branch-image-deploys)) so the tests reach the
 branch's code rather than a stale image. Then spot (`tests/integration/spot/`) and api-wired
@@ -545,7 +541,7 @@ competing Airflow load on the cluster and flakes on timing. The split binds ever
 invocation, Stage 5 included. Failures feed the worker's fix loop up to
 `PRAUTO_INTEGRATION_FIX_MAX_RETRIES`.
 
-**Stage 4 -- E2E (Playwright)** *(loop master; worker for fixes)*: runs when the diff touches
+**Stage 4 -- E2E (Playwright)** *(executor; worker for fixes)*: runs when the diff touches
 `src/frontend/`, `tests/e2e/`, or `src/api/` ([Branch image deploys](#branch-image-deploys)), and
 acquires the dev-env lock for its own run, strictly after the integration groups release theirs. It
 deploys the branch's frontend, then runs `pnpm -C tests/e2e test`.
@@ -558,11 +554,11 @@ deploys the branch's frontend, then runs `pnpm -C tests/e2e test`.
 - Ordering is a constraint, not a preference. Two reasons compound: the frontend deploy rolls the
   API pod, and `--components api` would delete the cluster frontend if it ran second. E2E must
   land strictly after the integration groups and never run concurrently with them.
-- `PRAUTO_E2E_FIX_MAX_RETRIES` defaults to `1`, which is **report-only**: the loop invokes a fix
+- `PRAUTO_E2E_FIX_MAX_RETRIES` defaults to `1`, which is **report-only**: the executor invokes a fix
   session only on a non-final attempt, so a single attempt runs the suite and reports the result
   without fixing. Raising it buys fix attempts at a full rebuild + redeploy each.
 
-**Stage 5 -- Final test report (post-push)** *(loop master)*: runs unit + integration tests —
+**Stage 5 -- Final test report (post-push)** *(executor)*: runs unit + integration tests —
 integration under Stage 3's two-group split — and posts results as collapsible PR comments.
 
 ### What a green run proves
@@ -644,35 +640,33 @@ needed. The parent denylist binds the parent session and nothing beyond it. The 
 already exported into every child's environment — so delegation widens an existing exposure
 rather than opening a new one.
 
-Turn and budget caps thin out the same way. A parent turn cap bounds the parent loop only;
-subagents take their own limits, and no project agent sets one, so `PRAUTO_MAX_TURNS_*` stops
-bounding delegated work. Whether a budget cap aggregates across subagents is **unverified** —
+Turn and budget caps thin out the same way. A parent turn cap bounds the parent coding-agent
+session only; subagents take their own limits, and no project agent sets one. Thus
+`PRAUTO_MAX_TURNS_*` stops bounding delegated work. Whether a budget cap aggregates across
+subagents is **unverified** —
 treat delegated spend as unbounded until someone establishes otherwise.
 
-### The meta-agent loop narrows the boundary, and relocates it
+### The executor boundary and its limits
 
-The loop-master split changes the trust calculus in one direction: the **reviewer is now a
-separate process** with its own context, so the "generator reviews its own work" escape no longer
-exists — the reviewer subagent was never in the worker's session and inherits no tool grants from
-it. This is a real strengthening of the generator ≠ reviewer rule.
+The executor's reviewer is a **separate process** with its own context, so the "generator reviews
+its own work" escape does not exist: the reviewer was never in the worker's session and inherits
+no tool grants from it. This strengthens the generator ≠ reviewer rule.
 
-It widens the boundary in another: a meta-agent's worker/reviewer subagents run with the loop
-master's own tool surface (terminal/file access), which is *broader* than prauto's whitelisted
-bash parent. The cluster binding (`$PRAUTO_DEV_ENV_FILE` resolved from `$REPO_DIR`) is therefore
-the only real containment left, and it must be treated as the primary boundary — not the tool
-whitelist.
+The worker and reviewer agents have terminal and file access that is broader than the executor's
+phase-specific tool whitelist. The cluster binding (`$PRAUTO_DEV_ENV_FILE` resolved from
+`$REPO_DIR`) is therefore the primary containment boundary, not the tool whitelist.
 
 | Layer | Restriction | Enforced? |
 |-------|-------------|-----------|
 | Coding-agent tools | Phase-specific whitelists | No — speed bump; `uv run python3` reaches around it, subagent delegation bypasses it |
 | Network access | No web fetch, curl, wget | No — `npx`/`pnpm dlx` fetch and execute arbitrary packages |
-| Cluster access | No kubectl, helm for the parent session | No — same reach-around; generators grant `Bash` outright; loop master deploys via `install.sh` |
+| Cluster access | No kubectl, helm for the parent session | No — same reach-around; generators grant `Bash` outright; executor deploys via `install.sh` |
 | Destructive ops | No rm -rf, sudo | No — speed bump only |
-| Git push | Only loop master pushes | No — speed bump; still valuable (see below) |
+| Git push | Only executor pushes | No — speed bump; still valuable (see below) |
 | Issue author | Org-member filter (on by default; disable in `config.local.env`) | Yes — `PRAUTO_GITHUB_ISSUE_FROM_ORG_MEMBERS_ONLY` |
 | Turn limits | Per-job caps | Parent only — subagents take their own limits; none set |
 | Budget limits | Per-job cap | Unverified across subagents |
-| Concurrency | Max open issues + a single live worker per wake | Yes — `PRAUTO_OPEN_ISSUE_LIMIT` (default 1) + the loop master's concurrency gate |
+| Concurrency | Max open issues + a single live worker per wake | Yes — `PRAUTO_OPEN_ISSUE_LIMIT` (default 1) + the executor's PID lock |
 | Cluster blast radius | Worker-dedicated dev cluster (default points at the shared one) | Partly — `--env-file` from `$REPO_DIR` pins where deploys/resets land, even for the worktree-run deploy scripts; a delegated `Bash` session still reaches any context in the machine's kubeconfig |
 | Secrets | Gitignored + denylist | No against delegation — a subagent `Read`s `config.local.env` directly, and `ANTHROPIC_API_KEY`/`GH_TOKEN` are already in the child's environment |
 
@@ -687,9 +681,9 @@ This is inherent, not incidental: test code must come from the branch to test th
 stage that runs integration or E2E executes code the branch authored, before a human has read it.
 No arrangement of the deploy removes this; it is the cost of testing a branch at all.
 
-- Branch-authored `conftest.py` and `tests/e2e` package scripts run **as the loop master** on the
+- Branch-authored `conftest.py` and `tests/e2e` package scripts run **under the executor** on the
   dev machine, not inside a builder.
-- The branch's own `install.sh` / `build-image.sh` run **as the loop master** during the deploy
+- The branch's own `install.sh` / `build-image.sh` run **under the executor** during the deploy
   stages, and their `docker build` runs over branch source, so branch build-time content
   (`package.json`, `next.config`, the Dockerfile, the chart) executes on the dev machine and
   in-cluster. This is the accepted cost of testing a branch's infra changes: proving them requires
@@ -711,7 +705,7 @@ one of the branch's choosing.
 | `.claude/settings.json` | Permission prompts do not apply — sessions run with permissions auto-approved; the denylist is prauto's own layer |
 | `.claude/agents/` / `.codex/agents/` | The implementation phase delegates to the generator and reviewer subagents; their definitions govern their tools and turns, their bodies point at the canonical role definitions in `scaffold/roles/` |
 | `.claude/workflows/` | `wf-minimal.js` drives the Claude binding's per-stage generate → review cycles (Codex expresses the equivalent orchestration in its worker prompt) |
-| `scaffold/roles/` | Canonical generator/evaluator roles — the loop master's final review gate reads `reviewer.md` directly |
+| `scaffold/roles/` | Canonical generator/evaluator roles — the executor's final review gate reads `reviewer.md` directly |
 | `scaffold/contracts/` | `reviewer-verdict.schema.json` is the verdict schema the review gate validates against |
 | `spec/` hierarchy | Analysis phase reads specs per `AGENTS.md` |
 
@@ -724,53 +718,47 @@ definitions say they are.
 
 ## Executor and Scheduler
 
-The contract above is executor-agnostic. The executor is the bash harness
-(`.prauto/heartbeat.sh` + `.prauto/lib/*.sh`); the scheduler is a **loop master** — any trigger
-that invokes the harness on a cadence. They split the work by durability: the harness owns
-everything deterministic (lock, claim, phase derivation, agent selection, dispatch, finalize),
-the loop master owns only the cadence.
+The contract above is executor-agnostic. The repository's executor is the Bash harness
+(`.prauto/heartbeat.sh` + `.prauto/lib/*.sh`); a scheduler is any trigger that invokes it on a
+cadence. They split work by durability: the executor owns lock, configuration, issue claiming and
+phase derivation, agent probing and selection, dispatch, and finalization; the scheduler owns
+cadence and launch only.
 
 ### The executor: the bash harness
 
-`.prauto/heartbeat.sh` implements the seven-step [Loop Master Cycle](#loop-master-cycle)
+`.prauto/heartbeat.sh` implements the seven-step [Executor Cycle](#executor-cycle)
 deterministically. The reasoning surfaces stay on the coding agents (plan gate, adversarial
-review, escalation); the harness owns the deterministic envelope:
+review, escalation); the executor owns the deterministic envelope:
 
 | Concern | Mechanism |
 |---|---|
 | Concurrency gate | `lib/state.sh` PID lockfile with a `kill -0` stale-check — a second wake never runs a worker against a worktree another is mid-flight on |
 | Cleanup | a `trap` removes the live worktree and releases the lock on any exit, so a dead worker leaves neither a dirty tree nor a stale lock |
 | Ephemeral reset | each wake sweeps orphaned worktrees first — *uncommitted* work is invisible to resume; committed checkpoints and the Codex `native-sessions/` anchor survive the reset and gate a resume |
-| GitHub identity | the harness resolves `gh api user` once at startup and asserts it against `PRAUTO_GITHUB_EXPECTED_ACTOR` (when set), so every comment/label/assignee is attributed to the worker account, never the keyring fallback |
+| GitHub identity | the executor resolves `gh api user` once at startup and asserts it against `PRAUTO_GITHUB_EXPECTED_ACTOR` (when set), so every comment/label/assignee is attributed to the worker account, never the keyring fallback |
 | SSOT readers | `lib/issues.sh` derives phase, retry count, and plan approval as exact `gh`+`jq` readers — never prose-derived |
 | Agent dispatch | `lib/agent.sh` invokes the coding agent per phase, honoring `PRAUTO_AGENT` and the [Quota-pause and resume](#quota-pause-and-resume) session-resume contract |
 
-The harness is self-contained: run `bash .prauto/heartbeat.sh` directly for a manual tick.
+The executor is self-contained: run `bash .prauto/heartbeat.sh` directly for a manual tick.
 
-### The scheduler: a loop master
+### The scheduler
 
-The scheduler is a **loop master** — any trigger that invokes the executor on a cadence. It runs
-no LLM, probes no agent, and pre-sets no `PRAUTO_AGENT`: agent selection is the executor's own
-job (`lib/agent.sh` `select_agent`). The loop master exists only to launch
-`bash .prauto/heartbeat.sh` on a cadence; because one tick's coding-agent invocation can run far
-longer than a cron/CI step's own time budget, each binding wraps the invocation so it returns
-immediately and lets the executor run detached.
+The scheduler invokes the executor on a cadence. It runs no LLM, probes no agent, and does not
+pre-set `PRAUTO_AGENT`: agent selection is the executor's own job (`lib/agent.sh`
+`select_agent`). A scheduler's only responsibility is to launch `bash .prauto/heartbeat.sh`.
 
 ### Reference binding: a no-agent Hermes cron job
 
-The reference loop-master binding shipped with this repo is a **no-agent Hermes cron job** — a
-shell wrapper that detaches the executor and returns immediately. Hermes is *one example*, not a
-requirement; the same wrapper pattern applies to any scheduler that runs a script on a timer.
+The reference scheduler binding is a **no-agent Hermes cron job**. Its shell wrapper launches a
+detached executor against the durable local checkout and returns immediately. This pattern is
+appropriate for a persistent, single-host scheduler that permits child processes to outlive the
+trigger. Hermes is one such scheduler, not a requirement.
 
 **Prerequisites**
 
-- Hermes Agent installed, and its **gateway running** — the cron scheduler fires only while the
-  gateway is up:
-
-  ```bash
-  hermes gateway install     # launchd/systemd user service, auto-starts at login
-  hermes cron status         # must print "✓ Gateway is running — cron jobs will fire automatically"
-  ```
+- Hermes Agent installed with its gateway running; the cron scheduler fires only while the
+  gateway is available. Follow Hermes's operator documentation for gateway installation and
+  status checks.
 
 - The repo checked out locally (the job's `workdir`), with `config.local.env` and the `prauto:*`
   labels in place.
@@ -787,60 +775,19 @@ fields live in `config.local.env` (gitignored — the repo is public).
 | `script` | `PRAUTO_SCHEDULER_HERMES_SCRIPT` | config.env | `prauto-heartbeat.sh` |
 | `no_agent` | (fixed) | config.env | `true` — no LLM, no skills, no toolsets |
 | `workdir` | `PRAUTO_SCHEDULER_HERMES_WORKDIR` | config.local.env | the local checkout (the wrapper's cwd) |
-| `deliver` | `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | `local` by default; a gateway platform for failure alerts |
+| `deliver` | `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | `local` by default; delivery applies to the wrapper's output |
 
-**Create it** — in a Hermes session, invoke the `cronjob` tool, substituting each value from the
-env files:
+Create the Hermes job from the table's values using Hermes's cron interface. `no_agent=true`
+makes the wrapper script the job: there is no prompt, skill, or toolset, and the scheduler does
+not perform executor work. Hermes observes only the wrapper's dispatch result. After the wrapper
+has detached, executor success, failure, and logs are observed through GitHub state and the
+executor log, not through that Hermes job result.
 
-```
-cronjob(action="create", name="$PRAUTO_SCHEDULER_HERMES_NAME",
-        schedule="$PRAUTO_SCHEDULER_HERMES_SCHEDULE",
-        script="$PRAUTO_SCHEDULER_HERMES_SCRIPT",
-        no_agent=True,
-        workdir="$PRAUTO_SCHEDULER_HERMES_WORKDIR",
-        deliver="$PRAUTO_SCHEDULER_HERMES_DELIVER")
-```
-
-`no_agent=True` makes the script *be* the job: stdout is delivered verbatim, empty stdout is a
-silent tick, and a non-zero exit or timeout raises a failure alert. There is no prompt, no
-skill, and no toolset — the scheduler must not do any of the tick's work.
-
-**The wrapper script** (canonical source: `.prauto/scheduler/prauto-heartbeat.sh`) runs with the
-job's `workdir` as its cwd. It detaches the executor and returns immediately:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-REPO="$(pwd -P)"                                        # the job's workdir
-LOG="$REPO/.prauto/state/heartbeat_cron.log"
-# GUI-launched gateways often inherit a minimal PATH; make the CLIs the executor
-# needs (gh, git, jq, claude, codex) resolvable regardless of how the gateway was launched.
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-nohup bash "$REPO/.prauto/heartbeat.sh" >>"$LOG" 2>&1 &
-printf 'prauto heartbeat detached (pid %s) → %s\n' "$!" "$LOG"
-```
-
-Hermes cron only executes scripts that resolve inside `$HERMES_HOME/scripts/` (and rejects paths
-that escape it), so install the canonical source there:
-
-```bash
-install -m 755 .prauto/scheduler/prauto-heartbeat.sh "$HERMES_HOME/scripts/prauto-heartbeat.sh"
-```
-
-The `nohup … &` detaches the executor so the cron tick returns immediately and never trips the
-script timeout; the executor's own PID lock + GitHub idempotency make overlapping hourly ticks
-safe.
-
-**Lifecycle** — manage the job from the CLI:
-
-```bash
-hermes cron list                     # job id + status
-hermes cron run <job_id>             # fire one tick now (verify before waiting for the schedule)
-hermes cron pause <job_id>           # stop firing, keep definition
-hermes cron resume <job_id>          # resume
-hermes cron edit <job_id> --schedule "every 2h"   # change cadence
-hermes cron remove <job_id>          # delete
-```
+The canonical wrapper is `.prauto/scheduler/prauto-heartbeat.sh`; it runs with the job's
+`workdir` as its cwd. Hermes requires scripts to resolve inside its configured scripts directory,
+so the operator installs that canonical source there using the Hermes installation procedure.
+The wrapper creates the executor log directory before launch, then detaches the executor. The
+executor's PID lock and GitHub idempotency make overlapping ticks safe.
 
 **The cron tick is not where the work happens.** The tick detaches the executor; the executor's
 agent invocations are the long-running part. GitHub is the SSOT for phase state
@@ -848,11 +795,15 @@ agent invocations are the long-running part. GitHub is the SSOT for phase state
 work-product continuity flows through committed branch checkpoints and agent-native session
 anchors, never in-memory state between ticks.
 
-### Other loop-master bindings
+### Other scheduler bindings
 
-The executor maps cleanly onto any scheduler that can invoke `bash .prauto/heartbeat.sh` on a
-cadence: launchd/systemd timers, GitHub Actions (a `schedule:` trigger), a CI runner, or a
-different cron. The Hermes no-agent wrapper above is just one such binding. A binding need only
-launch the executor (it may leave `PRAUTO_AGENT=auto` — agent selection is the executor's) and
-reproduce the four non-negotiables: GitHub as the phase-state SSOT, the evidence-based plan gate,
-generator ≠ reviewer, and the `$REPO_DIR`-anchored cluster binding.
+A persistent, single-host scheduler (such as a suitable cron, launchd, or systemd timer) may use
+a detached launcher only when it targets one durable checkout and permits the detached executor to
+survive after the trigger exits. It must not set `PRAUTO_AGENT`; the executor selects it.
+
+An ephemeral CI scheduler or a multi-host scheduler must run the executor in the foreground, or
+submit it to a durable worker. Such a binding must provide shared exclusion and persistent
+continuity storage; a local PID lock and local native-session anchor alone do not coordinate
+multiple hosts or survive an ephemeral workspace. Every binding preserves the contract: GitHub is
+the phase-state SSOT, the evidence-based plan gate and generator ≠ reviewer are mandatory, and
+cluster configuration remains anchored to `$REPO_DIR`.

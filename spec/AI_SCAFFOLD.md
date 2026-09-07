@@ -279,8 +279,8 @@ and manages the full issue-to-PR lifecycle. It is specified as an **executor + s
 contract** split: the contract (labels, phase state machine, the evidence-based plan gate,
 generator ≠ reviewer, deploy ordering, the security model) lives in `spec/AI_PRAUTO.md` and is
 agent-agnostic; the executor (`.prauto/heartbeat.sh` + `.prauto/lib/*.sh`) deterministically runs
-one tick; a thin loop master (reference Hermes-Agent binding) is the scheduler that wakes on a
-cadence, selects an agent, and invokes the executor. See `spec/AI_PRAUTO.md` for the full
+one tick, including locking, configuration, agent selection, dispatch, and finalization; a thin
+scheduler (the reference binding uses Hermes) supplies cadence and launches the executor only. See `spec/AI_PRAUTO.md` for the full
 specification.
 
 ---

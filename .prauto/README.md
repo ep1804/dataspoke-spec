@@ -14,7 +14,9 @@ The system is an **executor + scheduler + contract** split:
   finalize, and the quota-pause resume protocol. Run `bash .prauto/heartbeat.sh` for a manual
   tick.
 - **Scheduler** — a no-agent Hermes cron job (a shell wrapper) that detaches the executor on a
-  cadence. It probes no agent and pre-sets no `PRAUTO_AGENT`; agent selection is the executor's.
+  cadence. It probes no agent and pre-sets no `PRAUTO_AGENT`; local configuration and the
+  executor control agent selection. Its successful result confirms dispatch only; executor
+  status is reported through GitHub and the heartbeat log.
 
 See `spec/AI_PRAUTO.md` for the full specification.
 
@@ -76,7 +78,7 @@ absent.
 | `PRAUTO_BASE_BRANCH` | `dev` | Base branch for branches and PRs |
 | `PRAUTO_BRANCH_PREFIX` | `prauto/` | Branch prefix (`prauto/I-<n>`) |
 | `PRAUTO_WORKER_ID` | (set per instance) | Instance identity — unique per worker on a shared repo |
-| `PRAUTO_AGENT` | `claude` | `claude` \| `codex` \| `auto` (Claude then Codex) |
+| `PRAUTO_AGENT` | `auto` | `claude` \| `codex` \| `auto` (Claude then Codex) |
 | `PRAUTO_OPEN_ISSUE_LIMIT` | `1` | Max open issues this worker holds concurrently |
 | `PRAUTO_MAX_RETRIES_PER_JOB` | `3` | Heartbeat-marked attempts before abandonment |
 | `PRAUTO_DEV_ENV_FILE` | `helm-charts/.env.dev` | This worker's dedicated dev-cluster env file; resolves under the repo checkout, never a worktree |
@@ -88,13 +90,15 @@ Claude-specific `PRAUTO_CLAUDE_MAX_TURNS_*` and `PRAUTO_CLAUDE_MAX_BUDGET_*` set
 passed to Codex. Codex quota probes and worker sessions use JSONL so the executor can classify its
 structured rate-limit/error events and capture the native thread id.
 
-### Scheduler binding (loop master; Hermes cron as reference)
+### Scheduler binding (Hermes cron as reference)
 
-The scheduler is a **loop master** — any trigger that invokes the executor on a cadence. It
-probes no agent and pre-sets no `PRAUTO_AGENT`; agent selection is the executor's own
-(`select_agent`). The reference binding shipped here is a **no-agent Hermes cron job**, a shell
-wrapper that detaches the executor and returns immediately — but Hermes is *one example*, not a
-requirement (see `spec/AI_PRAUTO.md §Other loop-master bindings`).
+The scheduler triggers the executor on a cadence. It probes no agent and pre-sets no
+`PRAUTO_AGENT`; local configuration and executor selection
+(`select_agent`) choose the agent. The reference binding shipped here is a **no-agent Hermes cron
+job**, a shell wrapper that detaches the executor and returns immediately. This detached pattern
+is limited to a persistent, single-host scheduler that permits child processes to outlive the
+trigger; other bindings must follow the scope in `spec/AI_PRAUTO.md §Other scheduler bindings`.
+The wrapper reports dispatch only; inspect GitHub and the heartbeat log for executor status.
 
 The Hermes binding's settings are preserved as env vars so the job is reproducible from the repo.
 Repo-level fields (what the job *is*) live in `config.env`; the instance-identity fields
@@ -106,7 +110,7 @@ Repo-level fields (what the job *is*) live in `config.env`; the instance-identit
 | `PRAUTO_SCHEDULER_HERMES_NAME` | config.env | Cron job name |
 | `PRAUTO_SCHEDULER_HERMES_SCRIPT` | config.env | Wrapper script (`prauto-heartbeat.sh`) |
 | `PRAUTO_SCHEDULER_HERMES_WORKDIR` | config.local.env | Local checkout path (the job's `workdir` / the wrapper's cwd) |
-| `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | Where failure alerts go (`local`, `telegram`, …) |
+| `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | Hermes delivery setting (`local`, `telegram`, …); detached executor outcome is not a same-run scheduler result |
 
 The wrapper's canonical source is `.prauto/scheduler/prauto-heartbeat.sh`; install it to
 `$HERMES_HOME/scripts/` (Hermes cron only runs scripts inside that dir). See

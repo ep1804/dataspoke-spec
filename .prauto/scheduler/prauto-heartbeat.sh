@@ -14,12 +14,19 @@
 set -euo pipefail
 
 REPO="$(pwd -P)"
-LOG="$REPO/.prauto/state/heartbeat_cron.log"
 
 # GUI-launched gateways often inherit a minimal PATH; make the CLIs the executor
 # needs (gh, git, jq, claude, codex) resolvable regardless of how the gateway
-# process was launched.
+# process was launched. Set it before invoking external commands below.
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
+STATE_DIR="$REPO/.prauto/state"
+LOG="$STATE_DIR/heartbeat_cron.log"
+
+# A fresh checkout has no gitignored runtime directory yet. Create it before
+# opening the detached process's redirected log; otherwise the backgrounded
+# redirection fails while this wrapper still appears to have dispatched it.
+/bin/mkdir -p -- "$STATE_DIR"
+
 nohup bash "$REPO/.prauto/heartbeat.sh" >>"$LOG" 2>&1 &
-printf 'prauto heartbeat detached (pid %s) → %s\n' "$!" "$LOG"
+printf 'prauto heartbeat dispatched (pid %s) → %s; executor status is reported via GitHub/logs\n' "$!" "$LOG"
