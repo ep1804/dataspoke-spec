@@ -6,7 +6,7 @@ metadata:
 ---
 
 `helm-charts/bin/health-check.sh` is the gate five consumers branch on
-(`.claude/hooks/preflight-integration-tests.sh`, the PRauto loop master
+(`.claude/hooks/preflight-integration-tests.sh`, the PRauto executor
 (`spec/AI_PRAUTO.md §Dev Cluster and Deploys`),
 `.claude/skills/{k8s-deploy/SKILL.md,test-manual-api-wired/SKILL.md,
 test-manual-ui/helpers/preflight.sh}`).
@@ -57,8 +57,8 @@ covers the stall case.**
 
 1. **`exit` inside the sourced env file bypasses everything.** An env file whose
    first line is `exit 0` makes the script exit **0** with no banner and no
-   probes — the hook then writes its 60s bypass marker and the PRauto loop
-   master logs "health check passed"; `exit 1` makes the loop master provision
+   probes — the hook then writes its 60s bypass marker and the PRauto
+   executor logs "health check passed"; `exit 1` makes the executor provision
    a GKE cluster. The
    env file is `source`d, so it is already RCE-trusted; this is a
    contract/spec-accuracy gap. `HELM_CHART.md §Health Check` states the exit-2

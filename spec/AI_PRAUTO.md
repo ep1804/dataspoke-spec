@@ -143,7 +143,7 @@ loops over all claimed issues.
 **Worktree isolation**: Every worker session runs in a dedicated git worktree. The main repo
 directory is never the working directory during worker invocations.
 
-**Cadence**: The user-specified interval (default 4 hours). The schedule is owned by the
+**Cadence**: The user-specified interval (hourly in the reference binding). The schedule is owned by the
 scheduler binding, not by `config.local.env`.
 
 ---

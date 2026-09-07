@@ -280,8 +280,8 @@ contract** split: the contract (labels, phase state machine, the evidence-based 
 generator ≠ reviewer, deploy ordering, the security model) lives in `spec/AI_PRAUTO.md` and is
 agent-agnostic; the executor (`.prauto/heartbeat.sh` + `.prauto/lib/*.sh`) deterministically runs
 one tick, including locking, configuration, agent selection, dispatch, and finalization; a thin
-scheduler (the reference binding uses Hermes) supplies cadence and launches the executor only. See `spec/AI_PRAUTO.md` for the full
-specification.
+scheduler (the reference binding uses Hermes) supplies cadence and launches the executor only.
+See `spec/AI_PRAUTO.md` for the full specification.
 
 ---
 
