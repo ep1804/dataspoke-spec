@@ -57,18 +57,33 @@ interface Row {
   v: Record<string, number>;
 }
 
+interface LabelledPoint {
+  date: string;
+  [key: string]: string | number;
+}
+
 function row(t: string, v: Record<string, number>): Row {
   return { t, v };
 }
 
 /** toGrainPoints over Row[] at the given grain/tz. */
-function points(rows: Row[], grain: "hourly" | "daily" | "weekly", tz: "utc" | "local" = "utc") {
+function points(
+  rows: Row[],
+  grain: "hourly" | "daily" | "weekly",
+  tz: "utc" | "local" = "utc",
+): LabelledPoint[] {
+  // Most grain tests focus on labels and retained values. Keep that historical
+  // projection concise; the retained measurement timestamp is asserted in its
+  // own real-time-axis regression below.
   return toGrainPoints(rows, {
     grain,
     tz,
     timeOf: (r) => r.t,
     valuesOf: (r) => r.v,
-  });
+  }).map(
+    (point) =>
+      Object.fromEntries(Object.entries(point).filter(([key]) => key !== "timestamp")) as LabelledPoint,
+  );
 }
 
 /**
@@ -113,6 +128,50 @@ describe("grain vocabulary (FRONTEND_BASIC.md §Shared Component Notes → Chart
 // ── One point per window, carrying the window's LAST measurement ────────────────
 
 describe("toGrainPoints — one point per window, the window's last measurement", () => {
+  it("retains the winning measurement timestamp for real-time chart positioning", () => {
+    const out = toGrainPoints(
+      [
+        row("2026-05-04T01:00:00Z", { total: 10 }),
+        row("2026-05-04T09:00:00Z", { total: 11 }),
+      ],
+      {
+        grain: "daily",
+        tz: "utc",
+        timeOf: (r) => r.t,
+        valuesOf: (r) => r.v,
+      },
+    );
+
+    expect(out).toMatchObject([{ date: "2026-05-04", total: 11 }]);
+    expect(out[0].timestamp).toBe(Date.parse("2026-05-04T09:00:00Z"));
+  });
+
+  it("uses structural timestamps from the winning rows across chronologically ordered windows", () => {
+    const out = toGrainPoints(
+      [
+        row("2026-05-05T03:00:00Z", { total: 3, timestamp: 30 }),
+        row("2026-05-04T01:00:00Z", { total: 1, timestamp: 10 }),
+        row("2026-05-04T20:00:00Z", { total: 2, timestamp: 20 }),
+        row("2026-05-05T22:00:00Z", { total: 4, timestamp: 40 }),
+      ],
+      {
+        grain: "daily",
+        tz: "utc",
+        timeOf: (r) => r.t,
+        valuesOf: (r) => ({ ...r.v }),
+      },
+    );
+
+    expect(out.map((point) => point.date)).toEqual(["2026-05-04", "2026-05-05"]);
+    expect(out.map((point) => point.total)).toEqual([2, 4]);
+    expect(out.map((point) => point.timestamp)).toEqual([
+      Date.parse("2026-05-04T20:00:00Z"),
+      Date.parse("2026-05-05T22:00:00Z"),
+    ]);
+    expect(out[0].timestamp).not.toBe(20);
+    expect(out[1].timestamp).not.toBe(40);
+    expect(out[0].timestamp).toBeLessThan(out[1].timestamp);
+  });
   it("collapses two measurements in the same window to one point carrying the later values", () => {
     // spec: "each window contributes exactly one point: that window's last
     // measurement (greatest timestamp)".
@@ -657,7 +716,11 @@ describe("bucket labels sort chronologically as plain strings", () => {
             Object.entries(p).filter(([k]) => k !== "date"),
           ) as Record<string, number>,
       });
-      expect(twice).toEqual(once);
+      expect(
+        twice.map((point) =>
+          Object.fromEntries(Object.entries(point).filter(([key]) => key !== "timestamp")),
+        ),
+      ).toEqual(once);
     }
   });
 

@@ -42,9 +42,11 @@ export function grainTooltipLabel(grain: ChartGrain): string {
 }
 
 /**
- * A collapsed chart point. The x key is always `date` (the bucket label),
- * whatever the grain; the remaining keys carry that window's measured values.
- * The index signature admits `string` for two reasons: the `date` label itself
+ * A collapsed chart point. `timestamp` is the retained measurement's instant
+ * (milliseconds since Unix epoch), so charts can plot real elapsed time rather
+ * than equally spaced categories. `date` remains the grain-aware readable
+ * bucket label for ticks and tooltips; the remaining keys carry that window's
+ * measured values. The index signature admits `string` for two reasons: the `date` label itself
  * must conform, and `valuesOf` may also attach display-only string
  * annotations (e.g. `score_note`) alongside the numeric series. Neither kind
  * of string key may be used as a plotted dataKey — a value key colliding with
@@ -56,6 +58,7 @@ export function grainTooltipLabel(grain: ChartGrain): string {
  */
 export interface GrainPoint {
   date: string;
+  timestamp: number;
   [key: string]: string | number;
 }
 
@@ -136,5 +139,5 @@ export function toGrainPoints<T>(
 
   return Array.from(latest.entries())
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([date, { row }]) => ({ ...valuesOf(row), date }));
+    .map(([date, { t, row }]) => ({ ...valuesOf(row), date, timestamp: t }));
 }

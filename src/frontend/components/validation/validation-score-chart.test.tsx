@@ -30,6 +30,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import { ValidationScoreChart } from "./validation-score-chart";
 import type { ValidationResultRow } from "@/types/validation";
+import type { GrainPoint } from "@/lib/chart-grain";
 import type { TooltipContentProps } from "recharts";
 
 vi.mock("@/lib/preferences/timezone", () => ({ useDisplayTz: () => "utc" }));
@@ -41,6 +42,9 @@ vi.mock("@/lib/preferences/timezone", () => ({ useDisplayTz: () => "utc" }));
 // Must be prefixed "mock" — Vitest's `vi.mock` factory hoisting only allows
 // referencing outer bindings whose name starts with "mock".
 let mockTooltipContent: ((props: TooltipContentProps) => React.ReactNode) | null = null;
+let mockScoreDot: ((props: { payload: GrainPoint; cx?: number; cy?: number }) => React.ReactNode) | null = null;
+let mockActiveScoreDot: ((props: { payload: GrainPoint; cx?: number; cy?: number }) => React.ReactNode) | null = null;
+let mockScoreTickFormatter: ((value: number) => string) | null = null;
 
 vi.mock("recharts", () => {
   const Passthrough = ({ children }: { children?: React.ReactNode }) => (
@@ -65,25 +69,38 @@ vi.mock("recharts", () => {
     ),
     Line: ({
       dataKey,
+      type,
+      stroke,
       dot,
       activeDot,
     }: {
       dataKey?: string;
-      dot?: { r?: number } | boolean;
-      activeDot?: { r?: number } | boolean;
-    }) => (
-      <div
-        data-testid="line"
-        data-key={String(dataKey)}
-        data-dot={JSON.stringify(dot ?? null)}
-        data-active-dot={JSON.stringify(activeDot ?? null)}
-      />
-    ),
+      type?: string;
+      stroke?: string;
+      dot?: ((props: { payload: GrainPoint; cx?: number; cy?: number }) => React.ReactNode) | { r?: number } | boolean;
+      activeDot?: ((props: { payload: GrainPoint; cx?: number; cy?: number }) => React.ReactNode) | { r?: number } | boolean;
+    }) => {
+      mockScoreDot = typeof dot === "function" ? dot : null;
+      mockActiveScoreDot = typeof activeDot === "function" ? activeDot : null;
+      return (
+        <div
+          data-testid="line"
+          data-key={String(dataKey)}
+          data-type={String(type)}
+          data-stroke={String(stroke)}
+          data-dot={JSON.stringify(typeof dot === "function" ? null : dot ?? null)}
+          data-active-dot={JSON.stringify(typeof activeDot === "function" ? null : activeDot ?? null)}
+        />
+      );
+    },
     CartesianGrid: () => null,
-    XAxis: ({ dataKey }: { dataKey?: string }) => (
-      <div data-testid="x-axis" data-key={String(dataKey)} />
+    XAxis: ({ dataKey, type, scale, tickFormatter, ticks }: { dataKey?: string; type?: string; scale?: string; tickFormatter?: (value: number) => string; ticks?: number[] }) => {
+      mockScoreTickFormatter = tickFormatter ?? null;
+      return <div data-testid="x-axis" data-key={String(dataKey)} data-type={String(type)} data-scale={String(scale)} data-tick-label={tickFormatter?.(ticks?.[0] ?? 0) ?? ""} />;
+    },
+    YAxis: ({ domain }: { domain?: [number, number] }) => (
+      <div data-testid="y-axis" data-domain={JSON.stringify(domain ?? null)} />
     ),
-    YAxis: () => null,
     Tooltip: ({
       content,
     }: {
@@ -97,6 +114,9 @@ vi.mock("recharts", () => {
 
 beforeEach(() => {
   mockTooltipContent = null;
+  mockScoreDot = null;
+  mockActiveScoreDot = null;
+  mockScoreTickFormatter = null;
 });
 
 // ── Fixtures (inline, readable) ─────────────────────────────────────────────────
@@ -115,10 +135,10 @@ function categories(): string[] {
   ) as string[];
 }
 
-function plotted(): { date: string; score?: number; score_note?: string }[] {
+function plotted(): { date: string; timestamp: number; score?: number; score_note?: string }[] {
   return JSON.parse(
     screen.getByTestId("line-chart").getAttribute("data-points") as string,
-  ) as { date: string; score?: number; score_note?: string }[];
+  ) as { date: string; timestamp: number; score?: number; score_note?: string }[];
 }
 
 const EMPTY_MESSAGE = /no score data/i;
@@ -197,30 +217,55 @@ describe("ValidationScoreChart — a single grain window renders a visible point
     expect(screen.queryByText(EMPTY_MESSAGE)).not.toBeInTheDocument();
   });
 
-  it("configures a visible dot and a larger active dot", () => {
+  it("colors visible dots by the 1.0 threshold and keeps an enlarged active dot", () => {
     // spec: "each point is drawn with a visible dot and an enlarged active dot,
     // so a series of a single measurement renders as one visible point".
     // The radii themselves are not spec'd — only that a dot is configured (not
     // recharts' `false`/absent) and that the active one is larger. This does
     // constrain the props to the object form `{ r }`, which is how "enlarged" is
     // made observable at all.
-    render(<ValidationScoreChart results={[row("2026-05-04T09:00:00Z", 0.82)]} />);
+    render(<ValidationScoreChart results={[row("2026-05-04T09:00:00Z", 1), row("2026-05-05T09:00:00Z", 0.82)]} />);
 
     const line = screen.getByTestId("line");
-    const dot = JSON.parse(line.getAttribute("data-dot") as string) as { r?: number } | null;
-    const activeDot = JSON.parse(line.getAttribute("data-active-dot") as string) as {
-      r?: number;
-    } | null;
-
-    expect(dot?.r).toBeGreaterThan(0);
-    expect(activeDot?.r).toBeGreaterThan(dot?.r as number);
+    expect(line).toHaveAttribute("data-stroke", "#3f3f46");
+    expect(line).toHaveAttribute("data-type", "linear");
+    expect(screen.getByTestId("y-axis")).toHaveAttribute("data-domain", "[0,1]");
+    expect(mockScoreDot).not.toBeNull();
+    expect(mockActiveScoreDot).not.toBeNull();
+    const passing = mockScoreDot!({ payload: plotted()[0] as GrainPoint, cx: 10, cy: 10 }) as React.ReactElement<{ fill: string; r: number }>;
+    const failing = mockScoreDot!({ payload: plotted()[1] as GrainPoint, cx: 10, cy: 10 }) as React.ReactElement<{ fill: string; r: number }>;
+    const activePassing = mockActiveScoreDot!({ payload: plotted()[0] as GrainPoint, cx: 10, cy: 10 }) as React.ReactElement<{ fill: string; r: number }>;
+    const activeFailing = mockActiveScoreDot!({ payload: plotted()[1] as GrainPoint, cx: 10, cy: 10 }) as React.ReactElement<{ fill: string; r: number }>;
+    expect(passing.props.fill).toBe("#15803d");
+    expect(failing.props.fill).toBe("#f472b6");
+    expect(activePassing.props).toMatchObject({ fill: "#15803d", r: 7 });
+    expect(activeFailing.props).toMatchObject({ fill: "#f472b6", r: 7 });
+    expect(activePassing.props.r).toBeGreaterThan(passing.props.r);
+    expect(activeFailing.props.r).toBeGreaterThan(failing.props.r);
   });
 
-  it("binds the x-axis to the bucket-label key", () => {
-    // The window labels are only useful if the axis actually reads them; an axis
-    // bound to any other key is the unusable-axis defect this grain work fixes.
+  it("formats hourly and weekly real-time ticks with their grain labels", () => {
+    const results = [
+      row("2026-05-04T09:15:00Z", 1),
+      row("2026-05-06T09:30:00Z", 0.8),
+    ];
+    const hourly = render(<ValidationScoreChart results={results} grain="hourly" />);
+    const hourlyPoint = plotted()[0];
+    expect(mockScoreTickFormatter?.(hourlyPoint.timestamp)).toBe("2026-05-04 09:00");
+    hourly.unmount();
+
+    render(<ValidationScoreChart results={results} grain="weekly" />);
+    const weeklyPoint = plotted()[0];
+    expect(mockScoreTickFormatter?.(weeklyPoint.timestamp)).toBe("2026-05-04");
+  });
+
+  it("uses the retained measurement timestamp as a real-time x-axis while formatting grain labels", () => {
     render(<ValidationScoreChart results={[row("2026-05-04T09:00:00Z", 0.82)]} />);
-    expect(screen.getByTestId("x-axis")).toHaveAttribute("data-key", "date");
+    const axis = screen.getByTestId("x-axis");
+    expect(axis).toHaveAttribute("data-key", "timestamp");
+    expect(axis).toHaveAttribute("data-type", "number");
+    expect(axis).toHaveAttribute("data-scale", "time");
+    expect(axis).toHaveAttribute("data-tick-label", "2026-05-04");
   });
 });
 

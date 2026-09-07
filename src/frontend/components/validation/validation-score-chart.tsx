@@ -38,6 +38,10 @@ interface ValidationScoreChartProps {
   grain?: ChartGrain;
 }
 
+function scoreDotColor(point: GrainPoint): string {
+  return typeof point.score === "number" && point.score >= 1.0 ? "#15803d" : "#f472b6";
+}
+
 export function ValidationScoreChart({
   results,
   height = 200,
@@ -51,7 +55,7 @@ export function ValidationScoreChart({
   // (this page polls every 15s), including mid-hover.
   const renderScoreTooltip = useCallback(
     (props: TooltipContentProps) => {
-      const { active, payload, label, accessibilityLayer } = props;
+      const { active, payload, accessibilityLayer } = props;
       if (!active || !payload || payload.length === 0) return null;
       const point = payload[0].payload as GrainPoint;
       const score = point.score;
@@ -61,7 +65,7 @@ export function ValidationScoreChart({
           className="max-w-[16rem] rounded-md border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md"
           {...(accessibilityLayer ? { role: "status", "aria-live": "assertive" as const } : {})}
         >
-          <p>{`${grainTooltipLabel(grain)}: ${label}`}</p>
+          <p>{`${grainTooltipLabel(grain)}: ${point.date}`}</p>
           <p>{`score: ${typeof score === "number" ? score.toFixed(4) : score}`}</p>
           {typeof note === "string" && note.length > 0 && (
             <p className="mt-0.5 break-words text-muted-foreground">{note}</p>
@@ -79,6 +83,7 @@ export function ValidationScoreChart({
     timeOf: (r) => r.data_time,
     valuesOf: (r) => ({ score: r.score, score_note: r.score_note ?? "" }),
   });
+  const labelsByTimestamp = new Map(data.map((point) => [point.timestamp, point.date]));
 
   // Empty covers both "nothing fetched" and "nothing plottable" (every row's
   // timestamp unparseable), so the user never sees bare axes.
@@ -98,7 +103,12 @@ export function ValidationScoreChart({
       <LineChart data={data} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
         <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
         <XAxis
-          dataKey="date"
+          type="number"
+          dataKey="timestamp"
+          scale="time"
+          domain={["dataMin", "dataMax"]}
+          ticks={data.map((point) => point.timestamp)}
+          tickFormatter={(timestamp: number) => labelsByTimestamp.get(timestamp) ?? ""}
           tick={{ fontSize: 11 }}
           tickLine={false}
           axisLine={false}
@@ -114,9 +124,17 @@ export function ValidationScoreChart({
         <Line
           type="linear"
           dataKey="score"
-          stroke="hsl(var(--brand))"
-          dot={{ r: 3 }}
-          activeDot={{ r: 5 }}
+          stroke="#3f3f46"
+          dot={(props) => {
+            const point = props.payload as GrainPoint;
+            const fill = scoreDotColor(point);
+            return <circle cx={props.cx} cy={props.cy} r={5} fill={fill} stroke={fill} />;
+          }}
+          activeDot={(props) => {
+            const point = props.payload as GrainPoint;
+            const fill = scoreDotColor(point);
+            return <circle cx={props.cx} cy={props.cy} r={7} fill={fill} stroke={fill} />;
+          }}
           strokeWidth={2}
           connectNulls
         />

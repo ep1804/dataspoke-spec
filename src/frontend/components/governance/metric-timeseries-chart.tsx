@@ -59,15 +59,15 @@ export function MetricTimeseriesChart({
   const ordered = [...(series ?? [])].sort((a, b) => a.idx - b.idx);
 
   // Determine all value keys across results if neither descriptors nor an
-  // explicit key list is supplied. `date` is the x key, so a value key of that
-  // name is shadowed by the bucket label and must never become a series —
-  // plotting a string would poison the auto Y domain.
+  // explicit key list is supplied. `date` is the readable bucket label and
+  // `timestamp` is the numeric x key, so neither structural key may become a
+  // series — plotting either would corrupt the chart's value domain.
   const allKeys = (
     ordered.length > 0
       ? ordered.map((s) => s.name)
       : (valueKeys ??
         Array.from(new Set(results.flatMap((r) => Object.keys(r.values)))).sort())
-  ).filter((k) => k !== "date");
+  ).filter((k) => k !== "date" && k !== "timestamp");
 
   // colorForKey stays the fallback for a chart drawn without descriptors.
   const colorByName = new Map(ordered.map((s) => [s.name, s.color]));
@@ -81,6 +81,7 @@ export function MetricTimeseriesChart({
     timeOf: (r) => r.measured_at,
     valuesOf: (r) => r.values,
   });
+  const labelsByTimestamp = new Map(data.map((point) => [point.timestamp, point.date]));
 
   // Empty covers both "nothing fetched" and "nothing plottable" (every row's
   // timestamp unparseable), so the user never sees bare axes.
@@ -97,7 +98,12 @@ export function MetricTimeseriesChart({
       <LineChart data={data} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
         <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
         <XAxis
-          dataKey="date"
+          type="number"
+          dataKey="timestamp"
+          scale="time"
+          domain={["dataMin", "dataMax"]}
+          ticks={data.map((point) => point.timestamp)}
+          tickFormatter={(timestamp: number) => labelsByTimestamp.get(timestamp) ?? ""}
           tick={{ fontSize: 11 }}
           tickLine={false}
           axisLine={false}
@@ -105,7 +111,9 @@ export function MetricTimeseriesChart({
         <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
         <Tooltip
           contentStyle={{ fontSize: 12 }}
-          labelFormatter={(label) => `${grainTooltipLabel(grain)}: ${label}`}
+          labelFormatter={(timestamp) =>
+            `${grainTooltipLabel(grain)}: ${labelsByTimestamp.get(Number(timestamp)) ?? ""}`
+          }
         />
         <Legend wrapperStyle={{ fontSize: 12 }} />
         {allKeys.map((key) => (

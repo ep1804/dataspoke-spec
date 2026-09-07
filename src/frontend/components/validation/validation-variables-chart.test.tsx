@@ -27,6 +27,8 @@ import type { ValidationResultRow, ValidationVariable } from "@/types/validation
 
 vi.mock("@/lib/preferences/timezone", () => ({ useDisplayTz: () => "utc" }));
 
+let mockVariablesTickFormatter: ((value: number) => string) | null = null;
+
 // Mock recharts: each LineChart renders a marker element so we can count charts,
 // carrying its plotted x categories so the shared-axis invariant is observable.
 vi.mock("recharts", () => {
@@ -45,6 +47,7 @@ vi.mock("recharts", () => {
       <div
         data-testid="line-chart"
         data-categories={JSON.stringify((data ?? []).map((d) => d.date))}
+        data-points={JSON.stringify(data ?? [])}
       >
         {children}
       </div>
@@ -66,9 +69,10 @@ vi.mock("recharts", () => {
       />
     ),
     CartesianGrid: () => null,
-    XAxis: ({ dataKey }: { dataKey?: string }) => (
-      <div data-testid="x-axis" data-key={String(dataKey)} />
-    ),
+    XAxis: ({ dataKey, type, scale, tickFormatter, ticks }: { dataKey?: string; type?: string; scale?: string; tickFormatter?: (value: number) => string; ticks?: number[] }) => {
+      mockVariablesTickFormatter = tickFormatter ?? null;
+      return <div data-testid="x-axis" data-key={String(dataKey)} data-type={String(type)} data-scale={String(scale)} data-tick-label={tickFormatter?.(ticks?.[0] ?? 0) ?? ""} />;
+    },
     YAxis: () => null,
     Tooltip: () => null,
   };
@@ -76,6 +80,12 @@ vi.mock("recharts", () => {
 
 function row(dataTime: string, variables: Record<string, number>): ValidationResultRow {
   return { data_time: dataTime, score: 1, variables, score_note: null };
+}
+
+function plotted(): { date: string; timestamp: number; value?: number }[] {
+  return JSON.parse(
+    screen.getAllByTestId("line-chart")[0].getAttribute("data-points") as string,
+  ) as { date: string; timestamp: number; value?: number }[];
 }
 
 describe("ValidationVariablesChart — small multiples (FRONTEND_VALIDATION.md §Page contracts)", () => {
@@ -252,16 +262,36 @@ describe("ValidationVariablesChart — grain collapse", () => {
     }
   });
 
-  it("binds each small multiple's x-axis to the bucket-label key", () => {
-    // The window labels are only useful if the axis actually reads them; an axis
-    // bound to any other key is the unusable-axis defect this grain work fixes.
+  it("uses real-time timestamp x-axes while retaining grain-aware tick labels", () => {
     render(
       <ValidationVariablesChart results={sameDay} variables={variables} grain="daily" />,
     );
 
     const axes = screen.getAllByTestId("x-axis");
     expect(axes.length).toBeGreaterThan(0);
-    for (const axis of axes) expect(axis).toHaveAttribute("data-key", "date");
+    for (const axis of axes) {
+      expect(axis).toHaveAttribute("data-key", "timestamp");
+      expect(axis).toHaveAttribute("data-type", "number");
+      expect(axis).toHaveAttribute("data-scale", "time");
+      expect(axis).toHaveAttribute("data-tick-label", "2026-05-04");
+    }
+  });
+
+  it("formats hourly and weekly real-time ticks with their grain labels", () => {
+    const results = [
+      row("2026-05-04T09:15:00Z", { row_cnt: 100 }),
+      row("2026-05-06T09:30:00Z", { row_cnt: 120 }),
+    ];
+    const hourly = render(
+      <ValidationVariablesChart results={results} variables={variables} grain="hourly" />,
+    );
+    const hourlyPoint = plotted()[0];
+    expect(mockVariablesTickFormatter?.(hourlyPoint.timestamp)).toBe("2026-05-04 09:00");
+    hourly.unmount();
+
+    render(<ValidationVariablesChart results={results} variables={variables} grain="weekly" />);
+    const weeklyPoint = plotted()[0];
+    expect(mockVariablesTickFormatter?.(weeklyPoint.timestamp)).toBe("2026-05-04");
   });
 
   it("shows the empty-period message when every timestamp is unparseable", () => {

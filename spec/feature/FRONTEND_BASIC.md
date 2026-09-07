@@ -870,10 +870,13 @@ These component IDs are referenced from per-function specs.
   bucketed into grain windows and each window contributes exactly **one** point:
   that window's **last** measurement (greatest timestamp), labelled by the
   truncated window start, carrying enough date component to stay unique across the
-  selected range (hourly windows include the date, not the hour alone). Every x
-  label is therefore distinct, and each point is drawn with a visible dot and an
-  enlarged active dot, so a series of a single measurement renders as one visible
-  point and every plotted measurement is hoverable. Window boundaries are derived
+  selected range (hourly windows include the date, not the hour alone). Every
+  time-series chart uses a numeric/time x-axis: a point's horizontal position reflects
+  its retained measurement's actual timestamp, rather than equal category spacing.
+  Grain-aware readable tick labels and tooltips remain in the display timezone. Each
+  point is drawn with a visible dot and an enlarged active dot, so a series of a
+  single measurement renders as one visible point and every plotted measurement is
+  hoverable. Window boundaries are derived
   in the **global Settings timezone preference** (Local or UTC, default Local) —
   the same one the RangePicker's calendar reads — so switching Local↔UTC
   re-derives the buckets; weekly windows start on **Monday** and are labelled by

@@ -40,6 +40,8 @@ import type { MetricResult } from "@/types/governance";
 
 vi.mock("@/lib/preferences/timezone", () => ({ useDisplayTz: () => "utc" }));
 
+let mockMetricTickFormatter: ((value: number) => string) | null = null;
+
 vi.mock("recharts", () => {
   const Passthrough = ({ children }: { children?: React.ReactNode }) => (
     <div>{children}</div>
@@ -56,6 +58,7 @@ vi.mock("recharts", () => {
       <div
         data-testid="line-chart"
         data-categories={JSON.stringify((data ?? []).map((d) => d.date))}
+        data-points={JSON.stringify(data ?? [])}
       >
         {children}
       </div>
@@ -81,9 +84,10 @@ vi.mock("recharts", () => {
     ),
     CartesianGrid: () => null,
     Legend: () => null,
-    XAxis: ({ dataKey }: { dataKey?: string }) => (
-      <div data-testid="x-axis" data-key={String(dataKey)} />
-    ),
+    XAxis: ({ dataKey, type, scale, tickFormatter, ticks }: { dataKey?: string; type?: string; scale?: string; tickFormatter?: (value: number) => string; ticks?: number[] }) => {
+      mockMetricTickFormatter = tickFormatter ?? null;
+      return <div data-testid="x-axis" data-key={String(dataKey)} data-type={String(type)} data-scale={String(scale)} data-tick-label={tickFormatter?.(ticks?.[0] ?? 0) ?? ""} />;
+    },
     YAxis: () => null,
     Tooltip: () => null,
   };
@@ -127,6 +131,12 @@ function categories(): string[] {
   return JSON.parse(
     screen.getByTestId("line-chart").getAttribute("data-categories") as string,
   ) as string[];
+}
+
+function plotted(): { date: string; timestamp: number }[] {
+  return JSON.parse(
+    screen.getByTestId("line-chart").getAttribute("data-points") as string,
+  ) as { date: string; timestamp: number }[];
 }
 
 const EMPTY_MESSAGE = /no measurement data/i;
@@ -174,6 +184,17 @@ describe("MetricTimeseriesChart — one line per values key (FRONTEND_GOVERNANCE
     expect(seriesKeys()).toEqual(["total"]);
     // The x categories remain the bucket labels, not the shadowed numbers.
     expect(categories()).toEqual(["2026-05-04", "2026-05-05"]);
+  });
+
+  it("never plots the structural timestamp key from explicit valueKeys", () => {
+    render(
+      <MetricTimeseriesChart
+        results={[result("2026-05-04T00:00:00Z", { timestamp: 3, total: 7 })]}
+        valueKeys={["timestamp", "total"]}
+      />,
+    );
+
+    expect(seriesKeys()).toEqual(["total"]);
   });
 });
 
@@ -227,6 +248,20 @@ describe("MetricTimeseriesChart — series descriptors decide order and color", 
     );
 
     expect(drawOrder()).toEqual(["doc_health"]);
+  });
+
+  it("does not draw a descriptor named after the structural timestamp key", () => {
+    render(
+      <MetricTimeseriesChart
+        results={[result("2026-05-04T00:00:00Z", { timestamp: 3, total: 7 })]}
+        series={[
+          { name: "timestamp", color: "#64748B", idx: 1 },
+          { name: "total", color: "#A855F7", idx: 2 },
+        ]}
+      />,
+    );
+
+    expect(drawOrder()).toEqual(["total"]);
   });
 
   it("still draws a descriptor whose key is absent from the fetched results", () => {
@@ -324,13 +359,15 @@ describe("MetricTimeseriesChart — a single grain window renders a visible poin
     }
   });
 
-  it("binds the x-axis to the bucket-label key", () => {
-    // The window labels are only useful if the axis actually reads them; an axis
-    // bound to any other key is the unusable-axis defect this grain work fixes.
+  it("uses the retained measurement timestamp as a real-time x-axis while formatting grain labels", () => {
     render(
       <MetricTimeseriesChart results={[result("2026-05-04T09:00:00Z", { total: 7 })]} />,
     );
-    expect(screen.getByTestId("x-axis")).toHaveAttribute("data-key", "date");
+    const axis = screen.getByTestId("x-axis");
+    expect(axis).toHaveAttribute("data-key", "timestamp");
+    expect(axis).toHaveAttribute("data-type", "number");
+    expect(axis).toHaveAttribute("data-scale", "time");
+    expect(axis).toHaveAttribute("data-tick-label", "2026-05-04");
   });
 });
 
@@ -365,6 +402,17 @@ describe("MetricTimeseriesChart — grain governs the plotted windows", () => {
   it("defaults to daily when no grain is supplied", () => {
     render(<MetricTimeseriesChart results={results} />);
     expect(categories()).toEqual(["2026-05-04", "2026-05-06"]);
+  });
+
+  it("formats hourly and weekly real-time ticks with their grain labels", () => {
+    const hourly = render(<MetricTimeseriesChart results={results} grain="hourly" />);
+    const hourlyPoint = plotted()[0];
+    expect(mockMetricTickFormatter?.(hourlyPoint.timestamp)).toBe("2026-05-04 09:00");
+    hourly.unmount();
+
+    render(<MetricTimeseriesChart results={results} grain="weekly" />);
+    const weeklyPoint = plotted()[0];
+    expect(mockMetricTickFormatter?.(weeklyPoint.timestamp)).toBe("2026-05-04");
   });
 });
 

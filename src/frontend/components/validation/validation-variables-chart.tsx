@@ -97,8 +97,9 @@ export function ValidationVariablesChart({
       {charted.map((variable) => {
         const { name, description } = variable;
         const color = colorForKey(name, keys);
-        const data = points.map((p) => ({ date: p.date, value: p[name] }));
+        const data = points.map((p) => ({ date: p.date, timestamp: p.timestamp, value: p[name] }));
         const hasData = data.some((d) => d.value !== undefined);
+        const labelsByTimestamp = new Map(data.map((point) => [point.timestamp, point.date]));
 
         return (
           <div key={name} className="space-y-1">
@@ -130,7 +131,12 @@ export function ValidationVariablesChart({
                 >
                   <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                   <XAxis
-                    dataKey="date"
+                    type="number"
+                    dataKey="timestamp"
+                    scale="time"
+                    domain={["dataMin", "dataMax"]}
+                    ticks={data.map((point) => point.timestamp)}
+                    tickFormatter={(timestamp: number) => labelsByTimestamp.get(timestamp) ?? ""}
                     tick={{ fontSize: 10 }}
                     tickLine={false}
                     axisLine={false}
@@ -144,7 +150,9 @@ export function ValidationVariablesChart({
                   />
                   <Tooltip
                     contentStyle={{ fontSize: 12 }}
-                    labelFormatter={(label) => `${grainTooltipLabel(grain)}: ${label}`}
+                    labelFormatter={(timestamp) =>
+                      `${grainTooltipLabel(grain)}: ${labelsByTimestamp.get(Number(timestamp)) ?? ""}`
+                    }
                     formatter={(value) => [value, name]}
                   />
                   <Line
