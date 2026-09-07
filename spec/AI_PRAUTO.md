@@ -57,12 +57,16 @@ Two layers, with different lifespans and owners:
 
 ### Key design decisions
 
-- **GitHub as single source of truth**: Every wake derives its next action from **remote
-  GitHub state** (labels, assignees, comments, review status). Local state, where any exists, is
-  for debugging only. This principle matters *more* under a meta-agent loop than under a
-  long-lived bash worker: a scheduler tick is a fresh process with no in-memory carryover, so
-  "derive everything from GitHub, keep nothing in memory" is the only thing that makes the loop
-  resumable across ticks.
+- **GitHub as the SSOT for phase state**: Every wake derives its *next action* from **remote
+  GitHub state** (labels, assignees, comments, review status). Phase, retry count, and plan
+  approval are re-derived from GitHub on each tick; the harness carries no in-memory phase state
+  between ticks. This is what makes the loop resumable across a fresh-process scheduler tick.
+- **Continuity is not GitHub-only**: What a resume *continues* lives outside GitHub phase state.
+  Work-product continuity flows through (1) committed checkpoints on the issue branch (pushed,
+  linked to the issue, and posted as commit-link comments), (2) agent-native sessions (Claude
+  `--session-id`, Codex `thread_id`), and (3) the local `native-sessions/` anchor that gates a
+  Codex resume. GitHub is the source of truth for *phase state*; it is not the only carrier of
+  *work product*.
 - **No uncommitted resume**: Each worker session starts fresh unless the agent-native quota
   resume path is active. The implementation prompt instructs the agent to check the branch for
   existing committed work and continue from there. When the harness regains control, it
@@ -721,9 +725,10 @@ definitions say they are.
 ## Executor and Scheduler
 
 The contract above is executor-agnostic. The executor is the bash harness
-(`.prauto/heartbeat.sh` + `.prauto/lib/*.sh`); the scheduler is a cron job that selects an
-agent and invokes the harness. They split the work by durability: the harness owns everything
-deterministic, the cron owns only the cadence and the model choice.
+(`.prauto/heartbeat.sh` + `.prauto/lib/*.sh`); the scheduler is a **loop master** — any trigger
+that invokes the harness on a cadence. They split the work by durability: the harness owns
+everything deterministic (lock, claim, phase derivation, agent selection, dispatch, finalize),
+the loop master owns only the cadence.
 
 ### The executor: the bash harness
 
@@ -735,33 +740,41 @@ review, escalation); the harness owns the deterministic envelope:
 |---|---|
 | Concurrency gate | `lib/state.sh` PID lockfile with a `kill -0` stale-check — a second wake never runs a worker against a worktree another is mid-flight on |
 | Cleanup | a `trap` removes the live worktree and releases the lock on any exit, so a dead worker leaves neither a dirty tree nor a stale lock |
-| Ephemeral reset | each wake sweeps orphaned worktrees first (GitHub is the SSOT; uncommitted work is invisible to resume) |
+| Ephemeral reset | each wake sweeps orphaned worktrees first — *uncommitted* work is invisible to resume; committed checkpoints and the Codex `native-sessions/` anchor survive the reset and gate a resume |
 | GitHub identity | the harness resolves `gh api user` once at startup and asserts it against `PRAUTO_GITHUB_EXPECTED_ACTOR` (when set), so every comment/label/assignee is attributed to the worker account, never the keyring fallback |
 | SSOT readers | `lib/issues.sh` derives phase, retry count, and plan approval as exact `gh`+`jq` readers — never prose-derived |
 | Agent dispatch | `lib/agent.sh` invokes the coding agent per phase, honoring `PRAUTO_AGENT` and the [Quota-pause and resume](#quota-pause-and-resume) session-resume contract |
 
 The harness is self-contained: run `bash .prauto/heartbeat.sh` directly for a manual tick.
 
-### The scheduler: a cron job
+### The scheduler: a loop master
 
-The cron job is a thin scheduler + model selector. It probes the agents (the
-[Agent Availability](#agent-availability) probes) and sets `PRAUTO_AGENT` to the winner, then
-invokes `bash .prauto/heartbeat.sh` from the checkout. When the job leaves `PRAUTO_AGENT` unset
-or `auto`, the harness selects the agent itself — the cron probe is an optimization, not a
-dependency.
+The scheduler is a **loop master** — any trigger that invokes the executor on a cadence. It runs
+no LLM, probes no agent, and pre-sets no `PRAUTO_AGENT`: agent selection is the executor's own
+job (`lib/agent.sh` `select_agent`). The loop master exists only to launch
+`bash .prauto/heartbeat.sh` on a cadence; because one tick's coding-agent invocation can run far
+longer than a cron/CI step's own time budget, each binding wraps the invocation so it returns
+immediately and lets the executor run detached.
+
+### Reference binding: a no-agent Hermes cron job
+
+The reference loop-master binding shipped with this repo is a **no-agent Hermes cron job** — a
+shell wrapper that detaches the executor and returns immediately. Hermes is *one example*, not a
+requirement; the same wrapper pattern applies to any scheduler that runs a script on a timer.
 
 **Prerequisites**
 
-- Hermes Agent installed, with the `prauto-loop-master`, `claude-code`, and `codex` skills in
-  the hosting profile.
-- The repo checked out locally (the job's `workdir`), with `config.local.env` and the `prauto:*`
-  labels in place.
-- **The gateway running** — the cron scheduler fires only while the Hermes gateway is up:
+- Hermes Agent installed, and its **gateway running** — the cron scheduler fires only while the
+  gateway is up:
 
   ```bash
   hermes gateway install     # launchd/systemd user service, auto-starts at login
   hermes cron status         # must print "✓ Gateway is running — cron jobs will fire automatically"
   ```
+
+- The repo checked out locally (the job's `workdir`), with `config.local.env` and the `prauto:*`
+  labels in place.
+- The wrapper script installed at `$HERMES_HOME/scripts/` (see below).
 
 **Job definition (canonical)** — every field is preserved in the env files so the job is
 reproducible from the repo. Repo-level fields live in `config.env` (committed); instance-identity
@@ -769,35 +782,54 @@ fields live in `config.local.env` (gitignored — the repo is public).
 
 | Field | Env var | File | Value |
 |---|---|---|---|
-| `schedule` | `PRAUTO_LOOP_MASTER_HERMES_SCHEDULE` | config.env | `every 4h` (a tick with no actionable issue is a no-op) |
-| `name` | `PRAUTO_LOOP_MASTER_HERMES_NAME` | config.env | `DataSpoke PRauto loop master` |
-| `skills` | `PRAUTO_LOOP_MASTER_HERMES_SKILLS` | config.env | `prauto-loop-master claude-code codex` |
-| `enabled_toolsets` | `PRAUTO_LOOP_MASTER_HERMES_TOOLSETS` | config.env | `terminal file` |
-| Hermes profile | `PRAUTO_LOOP_MASTER_HERMES_PROFILE` | config.local.env | the hosting profile — a *record*, not a control |
-| `workdir` | `PRAUTO_LOOP_MASTER_HERMES_WORKDIR` | config.local.env | the local checkout |
-| `deliver` | `PRAUTO_LOOP_MASTER_HERMES_DELIVER` | config.local.env | `local` by default; a gateway platform for per-tick summaries |
+| `schedule` | `PRAUTO_SCHEDULER_HERMES_SCHEDULE` | config.env | `15 * * * *` (hourly at :15 past; a tick with no actionable issue is a no-op) |
+| `name` | `PRAUTO_SCHEDULER_HERMES_NAME` | config.env | `DataSpoke PRauto heartbeat` |
+| `script` | `PRAUTO_SCHEDULER_HERMES_SCRIPT` | config.env | `prauto-heartbeat.sh` |
+| `no_agent` | (fixed) | config.env | `true` — no LLM, no skills, no toolsets |
+| `workdir` | `PRAUTO_SCHEDULER_HERMES_WORKDIR` | config.local.env | the local checkout (the wrapper's cwd) |
+| `deliver` | `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | `local` by default; a gateway platform for failure alerts |
 
 **Create it** — in a Hermes session, invoke the `cronjob` tool, substituting each value from the
 env files:
 
 ```
-cronjob(action="create", name="$PRAUTO_LOOP_MASTER_HERMES_NAME",
-        schedule="$PRAUTO_LOOP_MASTER_HERMES_SCHEDULE",
-        skills=["prauto-loop-master", "claude-code", "codex"],
-        enabled_toolsets=["terminal", "file"],
-        workdir="$PRAUTO_LOOP_MASTER_HERMES_WORKDIR",
-        prompt="<one-tick instruction — see below>")
+cronjob(action="create", name="$PRAUTO_SCHEDULER_HERMES_NAME",
+        schedule="$PRAUTO_SCHEDULER_HERMES_SCHEDULE",
+        script="$PRAUTO_SCHEDULER_HERMES_SCRIPT",
+        no_agent=True,
+        workdir="$PRAUTO_SCHEDULER_HERMES_WORKDIR",
+        deliver="$PRAUTO_SCHEDULER_HERMES_DELIVER")
 ```
 
-**The prompt** (self-contained; the cron session knows nothing of this repo):
+`no_agent=True` makes the script *be* the job: stdout is delivered verbatim, empty stdout is a
+silent tick, and a non-zero exit or timeout raises a failure alert. There is no prompt, no
+skill, and no toolset — the scheduler must not do any of the tick's work.
 
-> Select the coding agent for this wake, then run the prauto executor. Probe Claude Code
-> (`claude auth status` then a 1-turn `claude -p "Reply with exactly: OK"` dry-run); if it fails,
-> probe Codex (`~/.codex/auth.json` then a `codex exec --json "Reply with exactly: OK"` dry-run). Set
-> `PRAUTO_AGENT=<winner>` in the environment and run `bash .prauto/heartbeat.sh` from
-> /path/to/dataspoke-baseline. Do not do any of the tick's work yourself — the harness owns
-> lock, claim, phase, dispatch, and finalize. Report the harness's exit status and a one-line
-> summary.
+**The wrapper script** (canonical source: `.prauto/scheduler/prauto-heartbeat.sh`) runs with the
+job's `workdir` as its cwd. It detaches the executor and returns immediately:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+REPO="$(pwd -P)"                                        # the job's workdir
+LOG="$REPO/.prauto/state/heartbeat_cron.log"
+# GUI-launched gateways often inherit a minimal PATH; make the CLIs the executor
+# needs (gh, git, jq, claude, codex) resolvable regardless of how the gateway was launched.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+nohup bash "$REPO/.prauto/heartbeat.sh" >>"$LOG" 2>&1 &
+printf 'prauto heartbeat detached (pid %s) → %s\n' "$!" "$LOG"
+```
+
+Hermes cron only executes scripts that resolve inside `$HERMES_HOME/scripts/` (and rejects paths
+that escape it), so install the canonical source there:
+
+```bash
+install -m 755 .prauto/scheduler/prauto-heartbeat.sh "$HERMES_HOME/scripts/prauto-heartbeat.sh"
+```
+
+The `nohup … &` detaches the executor so the cron tick returns immediately and never trips the
+script timeout; the executor's own PID lock + GitHub idempotency make overlapping hourly ticks
+safe.
 
 **Lifecycle** — manage the job from the CLI:
 
@@ -810,14 +842,17 @@ hermes cron edit <job_id> --schedule "every 2h"   # change cadence
 hermes cron remove <job_id>          # delete
 ```
 
-**The cron tick is not where the work happens.** The tick probes an agent and launches the
-harness; the harness's agent invocations are the long-running part. The GitHub-as-SSOT principle
-([Overview](#overview)) is the load-bearing resumability mechanism — each wake re-derives
-everything from GitHub, and the harness carries nothing in memory between ticks.
+**The cron tick is not where the work happens.** The tick detaches the executor; the executor's
+agent invocations are the long-running part. GitHub is the SSOT for phase state
+([Overview](#overview)) — each wake re-derives its next action from remote GitHub state — while
+work-product continuity flows through committed branch checkpoints and agent-native session
+anchors, never in-memory state between ticks.
 
-### Other bindings
+### Other loop-master bindings
 
 The executor maps cleanly onto any scheduler that can invoke `bash .prauto/heartbeat.sh` on a
-cadence: cron/launchd, GitHub Actions (a `schedule:` trigger), or a CI runner. Each must select
-an agent (or leave `PRAUTO_AGENT=auto`) and reproduce the four non-negotiables: GitHub-as-SSOT,
-the evidence-based plan gate, generator ≠ reviewer, and the `$REPO_DIR`-anchored cluster binding.
+cadence: launchd/systemd timers, GitHub Actions (a `schedule:` trigger), a CI runner, or a
+different cron. The Hermes no-agent wrapper above is just one such binding. A binding need only
+launch the executor (it may leave `PRAUTO_AGENT=auto` — agent selection is the executor's) and
+reproduce the four non-negotiables: GitHub as the phase-state SSOT, the evidence-based plan gate,
+generator ≠ reviewer, and the `$REPO_DIR`-anchored cluster binding.

@@ -13,8 +13,8 @@ The system is an **executor + scheduler + contract** split:
   deterministically: PID lock, config, agent selection, claim, phase derivation, dispatch,
   finalize, and the quota-pause resume protocol. Run `bash .prauto/heartbeat.sh` for a manual
   tick.
-- **Scheduler** — a thin Hermes cron job (`prauto-loop-master` skill) that probes the agents,
-  sets `PRAUTO_AGENT` to the winner, and invokes the executor.
+- **Scheduler** — a no-agent Hermes cron job (a shell wrapper) that detaches the executor on a
+  cadence. It probes no agent and pre-sets no `PRAUTO_AGENT`; agent selection is the executor's.
 
 See `spec/AI_PRAUTO.md` for the full specification.
 
@@ -88,24 +88,29 @@ Claude-specific `PRAUTO_CLAUDE_MAX_TURNS_*` and `PRAUTO_CLAUDE_MAX_BUDGET_*` set
 passed to Codex. Codex quota probes and worker sessions use JSONL so the executor can classify its
 structured rate-limit/error events and capture the native thread id.
 
-### Scheduler binding (Hermes cron)
+### Scheduler binding (loop master; Hermes cron as reference)
 
-The scheduler is a thin Hermes cron job: it probes the agents, sets `PRAUTO_AGENT` to the winner,
-and invokes `bash .prauto/heartbeat.sh`. Its settings are preserved as env vars so the job is
-reproducible from the repo. Repo-level fields (what the job *is*) live in `config.env`; the
-instance-identity fields (where/who runs it) live in `config.local.env` (gitignored).
+The scheduler is a **loop master** — any trigger that invokes the executor on a cadence. It
+probes no agent and pre-sets no `PRAUTO_AGENT`; agent selection is the executor's own
+(`select_agent`). The reference binding shipped here is a **no-agent Hermes cron job**, a shell
+wrapper that detaches the executor and returns immediately — but Hermes is *one example*, not a
+requirement (see `spec/AI_PRAUTO.md §Other loop-master bindings`).
+
+The Hermes binding's settings are preserved as env vars so the job is reproducible from the repo.
+Repo-level fields (what the job *is*) live in `config.env`; the instance-identity fields
+(where/who runs it) live in `config.local.env` (gitignored).
 
 | Var | File | Meaning |
 |-----|------|---------|
-| `PRAUTO_LOOP_MASTER_HERMES_SCHEDULE` | config.env | Wake cadence (`every 4h`) |
-| `PRAUTO_LOOP_MASTER_HERMES_NAME` | config.env | Cron job name |
-| `PRAUTO_LOOP_MASTER_HERMES_SKILLS` | config.env | Skills loaded per tick (`prauto-loop-master claude-code codex`) |
-| `PRAUTO_LOOP_MASTER_HERMES_TOOLSETS` | config.env | Toolsets scoped to the tick (`terminal file`) |
-| `PRAUTO_LOOP_MASTER_HERMES_PROFILE` | config.local.env | Hermes profile that hosts the job |
-| `PRAUTO_LOOP_MASTER_HERMES_WORKDIR` | config.local.env | Local checkout path (the job's `workdir`) |
-| `PRAUTO_LOOP_MASTER_HERMES_DELIVER` | config.local.env | Where tick summaries go (`local`, `telegram`, …) |
+| `PRAUTO_SCHEDULER_HERMES_SCHEDULE` | config.env | Wake cadence (`15 * * * *` — hourly at :15 past) |
+| `PRAUTO_SCHEDULER_HERMES_NAME` | config.env | Cron job name |
+| `PRAUTO_SCHEDULER_HERMES_SCRIPT` | config.env | Wrapper script (`prauto-heartbeat.sh`) |
+| `PRAUTO_SCHEDULER_HERMES_WORKDIR` | config.local.env | Local checkout path (the job's `workdir` / the wrapper's cwd) |
+| `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | Where failure alerts go (`local`, `telegram`, …) |
 
-See `spec/AI_PRAUTO.md §Installing the loop-master cron job` for the create call that consumes these.
+The wrapper's canonical source is `.prauto/scheduler/prauto-heartbeat.sh`; install it to
+`$HERMES_HOME/scripts/` (Hermes cron only runs scripts inside that dir). See
+`spec/AI_PRAUTO.md §Executor and Scheduler` for the create call that consumes these vars.
 
 ## Labels
 

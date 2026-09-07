@@ -134,7 +134,7 @@ push_branch_ref() {
 }
 
 # push_branch <branch>
-# Push the current branch to origin. This is loop-master-owned — the worker never
+# Push the current branch to origin. This is executor-owned — the worker never
 # pushes; only the harness finalize path calls this.
 push_branch() {
   local branch="$1"

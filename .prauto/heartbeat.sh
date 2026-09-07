@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # prauto heartbeat — one wake of the autonomous PR worker.
 #
-# This is the executor. The loop-master (a Hermes cron job) is now only a
-# scheduler + model selector: it probes claude/codex and may pre-set
-# PRAUTO_AGENT before invoking this script; when PRAUTO_AGENT is unset or
-# `auto`, this script selects the agent itself (select_agent).
+# This is the executor. The scheduler (a no-agent Hermes cron job) merely
+# detaches this script on a cadence — it probes no agent and pre-sets no
+# PRAUTO_AGENT. This script always selects the agent itself (select_agent).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
