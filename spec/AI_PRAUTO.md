@@ -8,8 +8,10 @@
 > *executor* and a thin *scheduler*. The contract defines labels, phase state, the evidence-based
 > plan gate, generator ≠ reviewer, deploy ordering, GitHub-as-SSOT, and the security model. The
 > executor (`.prauto/heartbeat.sh` with `.prauto/lib/*.sh`) owns each tick's lock, configuration,
-> agent probes and selection, dispatch, and finalization. A scheduler supplies cadence only; the
-> Hermes binding is one supported scheduler integration.
+> agent probes and selection, dispatch, and finalization. A scheduler supplies cadence and
+> supervision; the Hermes binding is one supported scheduler integration (an agent supervisor
+> that reports to Slack and detaches a background monitor), while the executor remains the sole
+> owner of every tick step.
 
 ---
 
@@ -48,8 +50,9 @@ Two layers, with different lifespans and owners:
   survives any re-implementation; it is specified here.
 - **Executor** — performs a tick: concurrency control, configuration, agent availability and
   selection, issue processing, worker/reviewer dispatch, and finalization.
-- **Scheduler** — supplies cadence and launches the executor. It does not select agents, inspect
-  quota, or perform issue work.
+- **Scheduler** — supplies cadence and launches the executor; the reference Hermes binding adds
+  an agent supervisor that reports to Slack and monitors the run. It does not select agents,
+  inspect quota, or perform issue work.
 
 ### Key design decisions
 
@@ -743,26 +746,34 @@ The executor is self-contained: run `bash .prauto/heartbeat.sh` directly for a m
 
 ### The scheduler
 
-The scheduler invokes the executor on a cadence. It runs no LLM, probes no agent, and does not
-pre-set `PRAUTO_AGENT`: agent selection is the executor's own job (`lib/agent.sh`
-`select_agent`). A scheduler's only responsibility is to launch `bash .prauto/heartbeat.sh`.
+The scheduler invokes the executor on a cadence. It probes no agent and does not pre-set
+`PRAUTO_AGENT`: agent selection is the executor's own job (`lib/agent.sh`
+`select_agent`). A scheduler's responsibilities are cadence, launch, and — in the reference
+Hermes binding — supervision and reporting (an agent that reports to Slack and detaches a
+background monitor). It performs no issue work and holds no phase state; that remains the
+executor's, re-derived from GitHub each tick.
 
-### Reference binding: a no-agent Hermes cron job
+### Reference binding: an agent-supervised Hermes cron job reporting to Slack
 
-The reference scheduler binding is a **no-agent Hermes cron job**. Its shell wrapper launches a
-detached executor against the durable local checkout and returns immediately. This pattern is
-appropriate for a persistent, single-host scheduler that permits child processes to outlive the
-trigger. Hermes is one such scheduler, not a requirement.
+The reference scheduler binding is an **agent-supervised Hermes cron job**. Each tick wakes a
+supervisor agent that (1) reports the trigger to Slack, (2) detaches the executor against the
+durable local checkout when it is idle, and (3) spawns the background monitor
+(`.prauto/scheduler/monitor.sh`) that keeps posting brief Slack notes until the coding agent
+finishes. The supervisor itself performs no issue work and holds no state between ticks; the
+detached executor and monitor are the long-running parts, and the executor's PID lock makes an
+"already running" tick a no-op. This pattern is appropriate for a persistent, single-host
+scheduler that permits child processes to outlive the trigger. Hermes is one such scheduler, not
+a requirement.
 
 **Prerequisites**
 
 - Hermes Agent installed with its gateway running; the cron scheduler fires only while the
   gateway is available. Follow Hermes's operator documentation for gateway installation and
-  status checks.
+  status checks. Slack reporting reuses the gateway's Slack credentials via `hermes send` (no
+  running gateway required for the bot-token path).
 
-- The repo checked out locally (the job's `workdir`), with `config.local.env` and the `prauto:*`
-  labels in place.
-- The wrapper script installed at `$HERMES_HOME/scripts/` (see below).
+- The repo checked out locally (the job's `workdir`), with `config.local.env`, the `prauto:*`
+  labels, and a Slack channel configured in place.
 
 **Job definition (canonical)** — every field is preserved in the env files so the job is
 reproducible from the repo. Repo-level fields live in `config.env` (committed); instance-identity
@@ -772,25 +783,28 @@ fields live in `config.local.env` (gitignored — the repo is public).
 |---|---|---|---|
 | `schedule` | `PRAUTO_SCHEDULER_HERMES_SCHEDULE` | config.env | `15 * * * *` (hourly at :15 past; a tick with no actionable issue is a no-op) |
 | `name` | `PRAUTO_SCHEDULER_HERMES_NAME` | config.env | `DataSpoke PRauto heartbeat` |
-| `script` | `PRAUTO_SCHEDULER_HERMES_SCRIPT` | config.env | `prauto-heartbeat.sh` |
-| `no_agent` | (fixed) | config.env | `true` — no LLM, no skills, no toolsets |
-| `workdir` | `PRAUTO_SCHEDULER_HERMES_WORKDIR` | config.local.env | the local checkout (the wrapper's cwd) |
-| `deliver` | `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | `local` by default; delivery applies to the wrapper's output |
+| `skills` | `PRAUTO_SCHEDULER_HERMES_SKILL` | config.env | `prauto-executor` (the supervisor skill) |
+| `prompt` | (canonical prompt below) | config.env | the supervisor procedure — report, detach, monitor |
+| `workdir` | `PRAUTO_SCHEDULER_HERMES_WORKDIR` | config.local.env | the local checkout |
+| `deliver` | `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | `local` — the supervisor's final response is archived; Slack reporting is explicit via `hermes send` |
 
-Create the Hermes job from the table's values using Hermes's cron interface. `no_agent=true`
-makes the wrapper script the job: there is no prompt, skill, or toolset, and the scheduler does
-not perform executor work. Hermes observes only the wrapper's dispatch result. After the wrapper
-has detached, executor success, failure, and logs are observed through GitHub state and the
-executor log, not through that Hermes job result.
+Create the Hermes job from the table's values using Hermes's cron interface. The supervisor
+agent does not perform executor work: it launches the executor and monitors it. After the
+executor and monitor are detached, executor success, failure, and phase state are observed
+through GitHub and the executor log — the monitor relays those to Slack, so Slack is the human
+surface, not the SSOT.
 
-The canonical wrapper is `.prauto/scheduler/prauto-heartbeat.sh`; it runs with the job's
-`workdir` as its cwd. Hermes requires scripts to resolve inside its configured scripts directory,
-so the operator installs that canonical source there using the Hermes installation procedure.
-The wrapper creates the executor log directory before launch, then detaches the executor. The
+The canonical monitor is `.prauto/scheduler/monitor.sh`; the supervisor detaches it through
+`.prauto/scheduler/launch.sh`, which owns the mechanical envelope — check the executor lock,
+detach the executor, verify it survived its first seconds, then detach the monitor. Both detaches
+use `.prauto/scheduler/daemonize.py`, a setsid double-fork that runs the executor and monitor in
+their own sessions (re-parented to launchd) so they survive the supervisor turn's process-group
+teardown — the Hermes terminal tool tears down with `killpg`, which misses setsid children. The
+monitor posts its own Slack notes via `hermes send` (no LLM, no running gateway required). The
 executor's PID lock and GitHub idempotency make overlapping ticks safe.
 
-**The cron tick is not where the work happens.** The tick detaches the executor; the executor's
-agent invocations are the long-running part. GitHub is the SSOT for phase state
+**The cron tick is not where the work happens.** The tick detaches the executor and the monitor;
+the executor's agent invocations are the long-running part. GitHub is the SSOT for phase state
 ([Overview](#overview)) — each wake re-derives its next action from remote GitHub state — while
 work-product continuity flows through committed branch checkpoints and agent-native session
 anchors, never in-memory state between ticks.

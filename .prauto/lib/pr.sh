@@ -235,25 +235,16 @@ ${co_authored_by%$'\n'}"
   }
   rm -f "$msg_file"
 
-  # Force-push with lease. With GH_TOKEN set, push over HTTPS with the token
-  # embedded so the push authenticates as the prauto account regardless of the
-  # local remote protocol (SSH remotes would otherwise use the system key).
+  # Force-push with lease, ALWAYS over SSH via the worker's dedicated key (scoped
+  # by ~/.gitconfig includeIf). GH_TOKEN is API-only and never near the push path.
   local expected_sha lease_flag="--force-with-lease"
   expected_sha=$(git rev-parse "refs/remotes/origin/${pr_branch}" 2>/dev/null || printf '')
   [[ -n "$expected_sha" ]] && lease_flag="--force-with-lease=refs/heads/${pr_branch}:${expected_sha}"
 
-  if [[ -n "${GH_TOKEN:-}" ]]; then
-    local push_url="https://x-access-token:${GH_TOKEN}@github.com/${PRAUTO_GITHUB_REPO}.git"
-    git push "$lease_flag" "$push_url" "HEAD:refs/heads/${pr_branch}" 2>/dev/null || {
-      warn "PR #${pr_number}: force-push failed. Skipping."
-      return 1
-    }
-  else
-    git push "$lease_flag" origin "$pr_branch" 2>/dev/null || {
-      warn "PR #${pr_number}: force-push failed. Skipping."
-      return 1
-    }
-  fi
+  git push "$lease_flag" origin "HEAD:refs/heads/${pr_branch}" 2>/dev/null || {
+    warn "PR #${pr_number}: force-push failed. Skipping."
+    return 1
+  }
   info "PR #${pr_number}: force-pushed squashed commit."
   link_branch_to_issue "$issue_number" "$pr_branch" || true
   publish_commit_checkpoints "$issue_number" "$pr_branch" || true

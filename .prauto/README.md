@@ -13,10 +13,11 @@ The system is an **executor + scheduler + contract** split:
   deterministically: PID lock, config, agent selection, claim, phase derivation, dispatch,
   finalize, and the quota-pause resume protocol. Run `bash .prauto/heartbeat.sh` for a manual
   tick.
-- **Scheduler** — a no-agent Hermes cron job (a shell wrapper) that detaches the executor on a
-  cadence. It probes no agent and pre-sets no `PRAUTO_AGENT`; local configuration and the
-  executor control agent selection. Its successful result confirms dispatch only; executor
-  status is reported through GitHub and the heartbeat log.
+- **Scheduler** — an agent-supervised Hermes cron job. Each tick wakes a supervisor agent that
+  reports the trigger to Slack, detaches the executor when idle, and spawns the background
+  monitor (`.prauto/scheduler/monitor.sh`) that posts brief Slack notes until the coding agent
+  finishes. The supervisor performs no issue work and pre-sets no `PRAUTO_AGENT`; local
+  configuration and the executor control agent selection.
 
 See `spec/AI_PRAUTO.md` for the full specification.
 
@@ -32,6 +33,9 @@ See `spec/AI_PRAUTO.md` for the full specification.
 | `prompts/*.md` | Worker phase prompt templates (analysis, implementation, integration-fix, e2e-fix, pr-review, squash-commit, feedback-response, system-append) — consumed by the executor's dispatch |
 | `state/` | Runtime state (gitignored) — session artifacts and logs |
 | `worktrees/` | Per-issue git worktrees (gitignored) |
+| `scheduler/launch.sh` | Hermes-binding launcher — detach+verify the executor and monitor in one step |
+| `scheduler/daemonize.py` | Detach primitive — setsid double-fork so children survive process-group teardown |
+| `scheduler/monitor.sh` | Hermes-binding monitor — detached Slack reporter for one executor run |
 
 The executor is self-contained: `bash .prauto/heartbeat.sh` runs a full tick (it selects the
 agent itself when `PRAUTO_AGENT` is unset or `auto`).
@@ -94,11 +98,13 @@ structured rate-limit/error events and capture the native thread id.
 
 The scheduler triggers the executor on a cadence. It probes no agent and pre-sets no
 `PRAUTO_AGENT`; local configuration and executor selection
-(`select_agent`) choose the agent. The reference binding shipped here is a **no-agent Hermes cron
-job**, a shell wrapper that detaches the executor and returns immediately. This detached pattern
-is limited to a persistent, single-host scheduler that permits child processes to outlive the
-trigger; other bindings must follow the scope in `spec/AI_PRAUTO.md §Other scheduler bindings`.
-The wrapper reports dispatch only; inspect GitHub and the heartbeat log for executor status.
+(`select_agent`) choose the agent. The reference binding shipped here is an **agent-supervised
+Hermes cron job**: each tick wakes a supervisor agent that reports the trigger to Slack, detaches
+the executor when idle, and spawns the background monitor (`.prauto/scheduler/monitor.sh`) that
+keeps posting brief Slack notes until the coding agent finishes. The supervisor performs no issue
+work and holds no state between ticks — the detached executor and monitor are the long-running
+parts, and the executor's PID lock makes an "already running" tick a no-op. Other bindings must
+follow the scope in `spec/AI_PRAUTO.md §Other scheduler bindings`.
 
 The Hermes binding's settings are preserved as env vars so the job is reproducible from the repo.
 Repo-level fields (what the job *is*) live in `config.env`; the instance-identity fields
@@ -108,13 +114,19 @@ Repo-level fields (what the job *is*) live in `config.env`; the instance-identit
 |-----|------|---------|
 | `PRAUTO_SCHEDULER_HERMES_SCHEDULE` | config.env | Wake cadence (`15 * * * *` — hourly at :15 past) |
 | `PRAUTO_SCHEDULER_HERMES_NAME` | config.env | Cron job name |
-| `PRAUTO_SCHEDULER_HERMES_SCRIPT` | config.env | Wrapper script (`prauto-heartbeat.sh`) |
-| `PRAUTO_SCHEDULER_HERMES_WORKDIR` | config.local.env | Local checkout path (the job's `workdir` / the wrapper's cwd) |
-| `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | Hermes delivery setting (`local`, `telegram`, …); detached executor outcome is not a same-run scheduler result |
+| `PRAUTO_SCHEDULER_HERMES_SKILL` | config.env | Supervisor skill loaded by the cron job (`prauto-executor`) |
+| `PRAUTO_SLACK_TARGET` | config.env | Slack channel the supervisor and monitor report to (`slack:hermes-dev`) |
+| `PRAUTO_MONITOR_CHECK_SECS` | config.env | Monitor liveness poll cadence (default 60) |
+| `PRAUTO_MONITOR_INTERVAL_SECS` | config.env | Monitor Slack-report cadence while running (default 600) |
+| `PRAUTO_SCHEDULER_HERMES_WORKDIR` | config.local.env | Local checkout path (the job's `workdir`) |
+| `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | Where the supervisor's final response is archived (`local`); Slack reporting is explicit via `hermes send` |
 
-The wrapper's canonical source is `.prauto/scheduler/prauto-heartbeat.sh`; install it to
-`$HERMES_HOME/scripts/` (Hermes cron only runs scripts inside that dir). See
-`spec/AI_PRAUTO.md §Executor and Scheduler` for the create call that consumes these vars.
+The monitor's canonical source is `.prauto/scheduler/monitor.sh`; the supervisor detaches it via
+`.prauto/scheduler/launch.sh` (which uses `.prauto/scheduler/daemonize.py` — a setsid double-fork
+— so the executor and monitor run in their own sessions and survive the supervisor turn's
+process-group teardown). The monitor posts its own Slack notes via `hermes send` (no LLM, no
+running gateway required). See `spec/AI_PRAUTO.md §Executor and Scheduler` for the create call
+that consumes these vars.
 
 ## Labels
 
