@@ -1,0 +1,107 @@
+---
+name: prauto-executor
+description: "Use when running or debugging the DataSpoke PRauto worker."
+version: 4.1.0
+author: DataSpoke (dataspoke-baseline)
+license: MIT
+platforms: [macos, linux]
+metadata:
+  hermes:
+    tags: [prauto, autonomous, orchestration, claude-code, codex, github, dataspoke]
+    related_skills: [claude-code, codex, hermes-agent]
+---
+
+# PRauto Executor + Supervisor
+
+The executor + scheduler for the DataSpoke autonomous PR worker (`prauto`).
+
+The whole tick is owned by the executor — `.prauto/heartbeat.sh` plus `.prauto/lib/*.sh` in the
+repo: PID lock, config, agent selection, claim, phase derivation, dispatch, finalize, and the
+quota-pause resume protocol. The scheduler is an **agent-supervised Hermes cron job**: each tick
+wakes THIS skill's supervisor procedure, which reports to Slack, detaches the executor when idle,
+and spawns the background monitor (`.prauto/scheduler/monitor.sh`) that keeps reporting until the
+coding agent finishes. The durable contract (labels, phase state machine, plan gate, security
+model, deploy ordering, quota-pause/resume) lives in `spec/AI_PRAUTO.md`.
+
+## Repo & config
+
+- Repo: this checkout (the cron job's `workdir`).
+- Executor: `.prauto/heartbeat.sh` (entrypoint) + `.prauto/lib/*.sh`.
+- Launcher: `.prauto/scheduler/launch.sh` (detach+verify the executor and the monitor).
+- Monitor: `.prauto/scheduler/monitor.sh` (detached Slack reporter; no LLM).
+- Config: `.prauto/config.env` (committed) + `.prauto/config.local.env` (gitignored).
+- `PRAUTO_AGENT`: `claude` | `codex` | `auto`. Pinned in `config.local.env`; the executor's
+  `select_agent` honors it. The supervisor does NOT pre-set it.
+- `PRAUTO_SLACK_TARGET`: Slack channel for reporting (default `slack:hermes-dev`).
+
+## The supervisor (agent cron) — per-tick procedure
+
+The cron job loads this skill and fires an agent with terminal access. Each tick the supervisor
+must:
+
+1. **Report the trigger** to Slack (a terminal call, not an LLM answer):
+   `hermes send --to "$PRAUTO_SLACK_TARGET" "🔔 prauto heartbeat cron triggered …"`
+   Read `PRAUTO_SLACK_TARGET` from `.prauto/config.env`; default `slack:hermes-dev`.
+
+2. **Move to the repo** (the job's `workdir`).
+
+3. **Launch + verify via the launcher** — do NOT use `nohup`/`&` (the terminal tool
+   blocks shell-level background wrappers AND tears down their process group on turn end;
+   the launcher uses `daemonize.py`'s setsid double-fork so the executor/monitor survive):
+   ```bash
+   bash .prauto/scheduler/launch.sh
+   ```
+   It prints exactly one status line plus (on early exit) the log tail:
+   - `ALREADY_RUNNING pid=N` → the executor is mid-run; report and do not launch again.
+   - `STARTED pid=N monitor_pid=M` → report 🚀 started + monitor attached.
+   - `EXITED_IMMEDIATELY pid=N` + log tail → report ⚠️ exited immediately + the reason line
+     (e.g. `No coding agent available`, `Claude auth check failed`), then STOP.
+   - `LAUNCH_FAILED …` → report the failure verbatim.
+   - `MONITOR_FAILED …` / `MONITOR_EXITED_IMMEDIATELY …` → the executor launched but the
+     monitor (Slack reporting) did not survive; report ⚠️ reporting degraded + the status line.
+
+   `launch.sh` detaches the executor, waits ~5s to confirm it survived, then detaches the
+   background monitor (`.prauto/scheduler/monitor.sh`) and verifies it too. The monitor posts a
+   brief Slack note every `PRAUTO_MONITOR_INTERVAL_SECS` (default 600) while the executor runs,
+   then a final result (done / no-agent / waiting-approval / quota-paused / crashed) and exits.
+
+4. **Report** to Slack what `launch.sh` returned (see the status→message mapping above),
+   then end the turn. Do NOT wait on the executor — it is detached and long-running.
+
+## Reading executor state (log markers)
+
+`.prauto/state/heartbeat_cron.log` — every wake appends a run header and `[INFO]`/`[WARN]` lines
+(ANSI-coloured). Strip colour with `sed -E 's/\x1b\[[0-9;]*m//g'`.
+
+| Marker | Meaning |
+|---|---|
+| `Lock acquired (PID …)` | Executor started |
+| `Dispatching issue #N (phase: X, attempt: Y/Z)` | A coding agent is about to run |
+| `Heartbeat complete.` | Tick finished |
+| `No coding agent available this wake.` | No agent passed the probe (auth/quota) |
+| `Claude auth check failed.` | Claude CLI logged out (`claude auth login` fixes it) |
+| `waiting for plan approval` | Waiting on a human, not quota |
+| `quota-paused (claude). Waiting.` | Quota-paused; resumes next window |
+
+## Manual tick
+
+Run `bash .prauto/heartbeat.sh` directly from the repo root. Do NOT pre-set `PRAUTO_AGENT` — the
+executor re-reads it from `config.local.env` and selects the agent itself. To watch a run without
+spamming Slack, run the monitor in the foreground with `PRAUTO_MONITOR_DRY_RUN=1`.
+
+## Pitfalls
+
+- **Do not do the tick's work in the supervisor.** Claim, phase derivation, dispatch, and
+  finalize are the executor's. The supervisor only launches and monitors.
+- **Detach via `launch.sh`, never `nohup &`.** The Hermes terminal tool blocks shell-level
+  background wrappers AND tears down their process group (killpg) when the turn ends. `launch.sh`
+  uses `daemonize.py`'s setsid double-fork, which escapes killpg (Hermes's own scheduler notes
+  killpg "misses setsid grandchildren").
+- **Both agents are login-based OAuth, not API tokens** — probe the CLI (`claude auth status`,
+  `~/.codex/auth.json`), never inspect a token. A dry-run timeout is not exhaustion.
+- **Quota-pause/resume is executor-owned.** The monitor only reports it; it never resumes or
+  restarts a session.
+- **`gh` identity is pinned by the executor** — it resolves `gh api user` once and asserts it
+  against `PRAUTO_GITHUB_EXPECTED_ACTOR` (when set).
+- **The monitor is self-terminating and idempotent** (`monitor.lock`). A re-fired tick that finds
+  a live executor and a live monitor just reports status and ends.

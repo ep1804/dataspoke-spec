@@ -115,6 +115,8 @@ Repo-level fields (what the job *is*) live in `config.env`; the instance-identit
 | `PRAUTO_SCHEDULER_HERMES_SCHEDULE` | config.env | Wake cadence (`15 * * * *` — hourly at :15 past) |
 | `PRAUTO_SCHEDULER_HERMES_NAME` | config.env | Cron job name |
 | `PRAUTO_SCHEDULER_HERMES_SKILL` | config.env | Supervisor skill loaded by the cron job (`prauto-executor`) |
+| `PRAUTO_SCHEDULER_HERMES_PROMPT_FILE` | config.env | Canonical supervisor prompt (`.prauto/scheduler/supervisor-prompt.md`) — the job's `prompt` field |
+| `PRAUTO_SCHEDULER_HERMES_SKILL_FILE` | config.env | Supervisor skill source (`.prauto/scheduler/prauto-executor/SKILL.md`) — install into the Hermes profile |
 | `PRAUTO_SLACK_TARGET` | config.env | Slack channel the supervisor and monitor report to (`slack:hermes-dev`) |
 | `PRAUTO_MONITOR_CHECK_SECS` | config.env | Monitor liveness poll cadence (default 60) |
 | `PRAUTO_MONITOR_INTERVAL_SECS` | config.env | Monitor Slack-report cadence while running (default 600) |
@@ -124,9 +126,19 @@ Repo-level fields (what the job *is*) live in `config.env`; the instance-identit
 The monitor's canonical source is `.prauto/scheduler/monitor.sh`; the supervisor detaches it via
 `.prauto/scheduler/launch.sh` (which uses `.prauto/scheduler/daemonize.py` — a setsid double-fork
 — so the executor and monitor run in their own sessions and survive the supervisor turn's
-process-group teardown). The monitor posts its own Slack notes via `hermes send` (no LLM, no
+process-group teardown). `launch.sh` also validates the monitor detach: a non-numeric or
+immediately-dead monitor PID is a `MONITOR_FAILED`/`MONITOR_EXITED_IMMEDIATELY` result (exit 1),
+never a silent success. The monitor posts its own Slack notes via `hermes send` (no LLM, no
 running gateway required). See `spec/AI_PRAUTO.md §Executor and Scheduler` for the create call
 that consumes these vars.
+
+Before creating the job, install the supervisor skill into the Hermes profile that runs it, or the
+job rejects the unknown `prauto-executor` skill:
+
+```bash
+mkdir -p ~/.hermes/skills/prauto-executor
+cp .prauto/scheduler/prauto-executor/SKILL.md ~/.hermes/skills/prauto-executor/SKILL.md
+```
 
 ## Labels
 

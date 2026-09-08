@@ -7,7 +7,9 @@
 # The executor and monitor run in their own sessions (see daemonize.py), so
 # they survive the supervisor turn's process-group teardown.
 #
-# Exit codes: 0 = launched/already-running/exited-with-report; 1 = launch failed.
+# Exit codes: 0 = launched/already-running/exited-with-report; 1 = launch failed
+# (executor failed to detach or died immediately, OR the monitor failed to detach or died
+# immediately — a MONITOR_* failure means the executor is running but Slack reporting is not).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,5 +63,19 @@ if [[ -f "$MONITOR_LOCK" ]]; then
   fi
 fi
 monitor_pid=$(python3 "$DAEMONIZE" "$MONITOR_LOG" -- bash "$SCRIPT_DIR/monitor.sh" "$exec_pid")
-echo "STARTED pid=$exec_pid monitor_pid=${monitor_pid:-unknown}"
+if [[ -z "$monitor_pid" || ! "$monitor_pid" =~ ^[0-9]+$ ]]; then
+  echo "MONITOR_FAILED pid=$exec_pid monitor_pid=${monitor_pid:-unknown}"
+  exit 1
+fi
+# 5. Verify the monitor survived its first seconds too. daemonize.py prints a numeric PID even
+#    when the command it is asked to exec is missing or dies immediately, so a non-numeric PID
+#    (caught above) is not the only failure: a monitor that detaches but exits right away must not
+#    be reported as a successful launch, or the run silently loses all Slack progress/final
+#    reporting while the supervisor is told it succeeded.
+sleep 3
+if ! kill -0 "$monitor_pid" 2>/dev/null; then
+  echo "MONITOR_EXITED_IMMEDIATELY pid=$exec_pid monitor_pid=$monitor_pid"
+  exit 1
+fi
+echo "STARTED pid=$exec_pid monitor_pid=$monitor_pid"
 exit 0

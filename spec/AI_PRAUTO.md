@@ -783,8 +783,8 @@ fields live in `config.local.env` (gitignored — the repo is public).
 |---|---|---|---|
 | `schedule` | `PRAUTO_SCHEDULER_HERMES_SCHEDULE` | config.env | `15 * * * *` (hourly at :15 past; a tick with no actionable issue is a no-op) |
 | `name` | `PRAUTO_SCHEDULER_HERMES_NAME` | config.env | `DataSpoke PRauto heartbeat` |
-| `skills` | `PRAUTO_SCHEDULER_HERMES_SKILL` | config.env | `prauto-executor` (the supervisor skill) |
-| `prompt` | (canonical prompt below) | config.env | the supervisor procedure — report, detach, monitor |
+| `skills` | `PRAUTO_SCHEDULER_HERMES_SKILL` | config.env | `prauto-executor` (the supervisor skill; source at `PRAUTO_SCHEDULER_HERMES_SKILL_FILE`) |
+| `prompt` | `PRAUTO_SCHEDULER_HERMES_PROMPT_FILE` | config.env | `.prauto/scheduler/supervisor-prompt.md` — the canonical supervisor procedure |
 | `workdir` | `PRAUTO_SCHEDULER_HERMES_WORKDIR` | config.local.env | the local checkout |
 | `deliver` | `PRAUTO_SCHEDULER_HERMES_DELIVER` | config.local.env | `local` — the supervisor's final response is archived; Slack reporting is explicit via `hermes send` |
 
@@ -794,12 +794,33 @@ executor and monitor are detached, executor success, failure, and phase state ar
 through GitHub and the executor log — the monitor relays those to Slack, so Slack is the human
 surface, not the SSOT.
 
+**Supervisor prompt and skill.** The two supervisor inputs the job references are committed to the
+repo, not left to a hand-built profile:
+
+- The canonical prompt is `.prauto/scheduler/supervisor-prompt.md` — the text placed verbatim in
+  the job's `prompt` field. It is the supervisor procedure: report the trigger to Slack, run
+  `bash .prauto/scheduler/launch.sh`, map the launcher's one-line status to a Slack report, and end
+  the turn. It never performs executor work.
+- The supervisor skill is `.prauto/scheduler/prauto-executor/SKILL.md` — the `prauto-executor`
+  skill the job's `skills` field loads. Install it into the Hermes profile that runs the cron job
+  before creating the job, or the job rejects the unknown skill:
+
+  ```bash
+  mkdir -p ~/.hermes/skills/prauto-executor
+  cp .prauto/scheduler/prauto-executor/SKILL.md ~/.hermes/skills/prauto-executor/SKILL.md
+  ```
+
+  For a non-default profile, target `~/.hermes/profiles/<name>/skills/…` instead.
+
 The canonical monitor is `.prauto/scheduler/monitor.sh`; the supervisor detaches it through
 `.prauto/scheduler/launch.sh`, which owns the mechanical envelope — check the executor lock,
 detach the executor, verify it survived its first seconds, then detach the monitor. Both detaches
 use `.prauto/scheduler/daemonize.py`, a setsid double-fork that runs the executor and monitor in
 their own sessions (re-parented to launchd) so they survive the supervisor turn's process-group
 teardown — the Hermes terminal tool tears down with `killpg`, which misses setsid children. The
+launcher also validates the monitor detach: a non-numeric or immediately-dead monitor PID is a
+`MONITOR_FAILED`/`MONITOR_EXITED_IMMEDIATELY` result (exit 1), never a silent success, so a run
+that lost its Slack reporting is surfaced to the supervisor rather than reported as launched. The
 monitor posts its own Slack notes via `hermes send` (no LLM, no running gateway required). The
 executor's PID lock and GitHub idempotency make overlapping ticks safe.
 
