@@ -39,11 +39,18 @@ model, deploy ordering, quota-pause/resume) lives in `spec/AI_PRAUTO.md`.
 The cron job loads this skill and fires an agent with terminal access. Each tick the supervisor
 must:
 
-1. **Report the trigger** to Slack (a terminal call, not an LLM answer):
-   `hermes send --to "$PRAUTO_SLACK_TARGET" "🔔 prauto heartbeat cron triggered …"`
-   Read `PRAUTO_SLACK_TARGET` from `.prauto/config.env`; default `slack:hermes-dev`.
+1. **Load the config first** (Hermes cron does not normally inherit these vars). The job's
+   `workdir` is already the repo checkout, so source the committed config and the gitignored
+   local overrides from the current directory, so `PRAUTO_SLACK_TARGET` and any
+   `config.local.env` override resolve before the first send:
+   ```bash
+   source .prauto/config.env
+   [[ -f .prauto/config.local.env ]] && source .prauto/config.local.env
+   ```
 
-2. **Move to the repo** (the job's `workdir`).
+2. **Report the trigger** to Slack (a terminal call, not an LLM answer; default
+   `slack:hermes-dev`):
+   `hermes send --to "${PRAUTO_SLACK_TARGET:-slack:hermes-dev}" "🔔 prauto heartbeat cron triggered …"`
 
 3. **Launch + verify via the launcher** — do NOT use `nohup`/`&` (the terminal tool
    blocks shell-level background wrappers AND tears down their process group on turn end;

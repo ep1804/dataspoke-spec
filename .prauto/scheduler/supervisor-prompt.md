@@ -2,12 +2,17 @@ You are the PRauto supervisor for one cron tick. Report the trigger to Slack, la
 when idle, then detach the monitor. Do not perform any issue work — the detached executor owns the
 entire tick.
 
-1. Report the trigger to Slack (read `PRAUTO_SLACK_TARGET` from `.prauto/config.env`, default
-   `slack:hermes-dev`):
+1. Load the config (Hermes cron does not normally inherit these vars). The job's workdir is
+   already the repo checkout, so source the committed config and the gitignored local overrides
+   from the current directory, so `PRAUTO_SLACK_TARGET` and any `config.local.env` override
+   resolve before the first send:
 
-   hermes send --to "$PRAUTO_SLACK_TARGET" "🔔 prauto heartbeat cron triggered"
+   source .prauto/config.env
+   [[ -f .prauto/config.local.env ]] && source .prauto/config.local.env
 
-2. Move to the repo checkout (the job's workdir).
+2. Report the trigger to Slack (default target `slack:hermes-dev`):
+
+   hermes send --to "${PRAUTO_SLACK_TARGET:-slack:hermes-dev}" "🔔 prauto heartbeat cron triggered"
 
 3. Launch + verify via the launcher — never `nohup`/`&` (the launcher's setsid double-fork is
    what survives your turn's process-group teardown):
