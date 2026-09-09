@@ -205,3 +205,42 @@ complete_job() {
     > "$history_file"
   info "Job for issue #${issue_number} completed -> ${history_file}"
 }
+
+# ---- Retry counter (local state, not GitHub comments) ------------------------
+# Quota-pause cycles do not reach the normal dispatch path, so a state-file
+# counter correctly tracks only genuine attempt starts. The counter is checked
+# and incremented in heartbeat.sh's normal dispatch; a resume is a continuation,
+# not a new attempt.
+
+# retry_count_file <issue_number> — path to the counter state file.
+retry_count_file() {
+  printf '%s/retry-count-%s.json' "$STATE_DIR" "$1"
+}
+
+# read_retry_count <issue_number>
+# Sets RETRY_COUNT (0 when the file is absent or unreadable).
+read_retry_count() {
+  local issue_number="$1" cf
+  cf=$(retry_count_file "$issue_number") || { RETRY_COUNT=0; return 0; }
+  RETRY_COUNT=$(jq -r '.count // 0' "$cf" 2>/dev/null) || RETRY_COUNT=0
+  RETRY_COUNT=${RETRY_COUNT:-0}
+}
+
+# increment_retry_count <issue_number>
+# Increment the current retry count by one, persist it atomically, and set
+# RETRY_COUNT to the new value so callers can use it directly.
+increment_retry_count() {
+  local issue_number="$1" cf new_count
+  cf=$(retry_count_file "$issue_number") || return 1
+  read_retry_count "$issue_number"
+  new_count=$((RETRY_COUNT + 1))
+  local tmp_file
+  tmp_file=$(mktemp "${cf}.tmp.XXXXXX") || return 1
+  jq -n \
+    --argjson issue_number "$issue_number" \
+    --argjson count "$new_count" \
+    --arg last_updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{issue_number: $issue_number, count: $count, last_updated: $last_updated}' \
+    > "$tmp_file" && mv -f "$tmp_file" "$cf"
+  RETRY_COUNT=$new_count
+}

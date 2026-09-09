@@ -218,13 +218,19 @@ if [[ "${ALL_CLAIMED_COUNT:-0}" -gt 0 ]]; then
       fi
 
       # ---- Normal dispatch: retry tracking + heartbeat + phase handler ----
-      count_heartbeat_comments "$CUR_ISSUE_NUMBER"
-      retry_count=$((HEARTBEAT_COMMENT_COUNT + 1))
-      if [[ "$HEARTBEAT_COMMENT_COUNT" -ge "$PRAUTO_MAX_RETRIES_PER_JOB" ]]; then
-        warn "Issue #${CUR_ISSUE_NUMBER} exceeded max retries (${HEARTBEAT_COMMENT_COUNT}/${PRAUTO_MAX_RETRIES_PER_JOB})."
-        abandon_job_github "$CUR_ISSUE_NUMBER" "$HEARTBEAT_COMMENT_COUNT"
+      # The retry counter tracks genuine attempt starts in local state. Quota-pause
+      # cycles short-circuit before reaching this path (line 178-218), so a quota
+      # death never burns a retry slot. The counter is checked BEFORE incrementing,
+      # so attempt N checks against the limit using the count from the previous
+      # (N-1) attempts — the current attempt starts at count+1.
+      read_retry_count "$CUR_ISSUE_NUMBER"
+      if [[ "$RETRY_COUNT" -ge "$PRAUTO_MAX_RETRIES_PER_JOB" ]]; then
+        warn "Issue #${CUR_ISSUE_NUMBER} exceeded max retries (${RETRY_COUNT}/${PRAUTO_MAX_RETRIES_PER_JOB})."
+        abandon_job_github "$CUR_ISSUE_NUMBER" "$RETRY_COUNT"
         claim_i=$((claim_i + 1)); continue
       fi
+      increment_retry_count "$CUR_ISSUE_NUMBER"
+      retry_count=$RETRY_COUNT  # RETRY_COUNT was set by increment_retry_count → read_retry_count
 
       post_heartbeat_comment "$CUR_ISSUE_NUMBER" "$DERIVED_PHASE" "$retry_count" "$PRAUTO_MAX_RETRIES_PER_JOB"
       info "Dispatching issue #${CUR_ISSUE_NUMBER} (phase: ${DERIVED_PHASE}, attempt: ${retry_count}/${PRAUTO_MAX_RETRIES_PER_JOB})."
@@ -236,7 +242,7 @@ if [[ "${ALL_CLAIMED_COUNT:-0}" -gt 0 ]]; then
         implementation) handle_phase_implementation "$CUR_ISSUE_NUMBER" "$CUR_ISSUE_TITLE" "$CUR_BRANCH" ;;
         pr)             handle_phase_pr "$CUR_ISSUE_NUMBER" "$CUR_ISSUE_TITLE" "$CUR_BRANCH" ;;
         *)              warn "Unknown phase: ${DERIVED_PHASE}. Abandoning."
-                        abandon_job_github "$CUR_ISSUE_NUMBER" "$HEARTBEAT_COMMENT_COUNT" ;;
+                        abandon_job_github "$CUR_ISSUE_NUMBER" "$RETRY_COUNT" ;;
       esac
       info "WIP issue #${CUR_ISSUE_NUMBER} processing complete."
       cleanup_worktree

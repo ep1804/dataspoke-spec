@@ -639,9 +639,9 @@ implement_and_finalize() {
       return 0
     fi
   else
-    # FRESH dispatch.
-    gh issue comment "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
-      --body "prauto(${PRAUTO_WORKER_ID}): Heartbeat — implementation starting" 2>/dev/null || true
+    # FRESH dispatch. The caller (heartbeat.sh's normal dispatch or
+    # handle_phase_plan_approval) already posted the phase heartbeat — do not
+    # double-post here.
     run_implementation "$issue_number" "$branch" "$plan"
 
     # Mid-run quota death: pause (with session id), do not finalize, do not burn
@@ -759,6 +759,8 @@ handle_phase_plan_approval() {
     info "Plan approved. Starting implementation..."
     gh issue edit "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
       --remove-label "${PRAUTO_GITHUB_LABEL_PLAN_REVIEW}" 2>/dev/null || true
+    gh issue comment "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
+      --body "prauto(${PRAUTO_WORKER_ID}): Heartbeat — implementation starting" 2>/dev/null || true
     fetch_approved_plan "$issue_number"
     implement_and_finalize "$issue_number" "$branch" "$APPROVED_PLAN_TEXT" "$issue_title"
   elif [[ "$approval_status" -eq 2 ]]; then

@@ -275,9 +275,16 @@ On every wake (comment checks scoped to current lifecycle):
 
 ### Retry tracking
 
-Each wake posts a marker comment on the issue. `count_heartbeat_comments()` counts markers
-within the current lifecycle only (after ready-label timestamp + most recent `Claimed` comment).
-At `PRAUTO_MAX_RETRIES_PER_JOB`, the issue is abandoned. The `plan-approval` phase is exempt.
+A local state file (`.prauto/state/retry-count-<issue>.json`) tracks the retry counter per issue.
+The counter is read and incremented only in the **normal dispatch path** — the code path reached when
+no quota-pause marker is present. Quota-pause cycles (marker → resume → re-pause) bypass this path
+entirely, so a quota death never burns a retry slot. Only genuine attempt starts (fresh dispatches
+and retries after non-quota failures) advance the counter. The plan-approval path also bypasses
+the counter — the first implementation dispatch after plan approval is always free.
+
+At `PRAUTO_MAX_RETRIES_PER_JOB` (default 4), the issue is abandoned. The counter is checked
+**before** incrementing: a dispatch at count 3 with max 4 checks `3 >= 4` → false → proceeds
+→ increments to 4. The next dispatch sees `4 >= 4` → abandon.
 
 ### Job completion and abandonment
 
