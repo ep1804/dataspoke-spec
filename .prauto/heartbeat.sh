@@ -229,7 +229,11 @@ if [[ "${ALL_CLAIMED_COUNT:-0}" -gt 0 ]]; then
         abandon_job_github "$CUR_ISSUE_NUMBER" "$RETRY_COUNT"
         claim_i=$((claim_i + 1)); continue
       fi
-      increment_retry_count "$CUR_ISSUE_NUMBER"
+      if ! increment_retry_count "$CUR_ISSUE_NUMBER"; then
+        warn "Issue #${CUR_ISSUE_NUMBER}: could not persist retry state. Waiting for a later wake."
+        pending_claimed_count=$((pending_claimed_count + 1))
+        claim_i=$((claim_i + 1)); continue
+      fi
       retry_count=$RETRY_COUNT  # RETRY_COUNT was set by increment_retry_count → read_retry_count
 
       post_heartbeat_comment "$CUR_ISSUE_NUMBER" "$DERIVED_PHASE" "$retry_count" "$PRAUTO_MAX_RETRIES_PER_JOB"

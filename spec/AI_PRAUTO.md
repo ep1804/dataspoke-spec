@@ -275,12 +275,18 @@ On every wake (comment checks scoped to current lifecycle):
 
 ### Retry tracking
 
-A local state file (`.prauto/state/retry-count-<issue>.json`) tracks the retry counter per issue.
-The counter is read and incremented only in the **normal dispatch path** — the code path reached when
+A local state file (`.prauto/state/retry-count-<issue>.json`) tracks the retry counter for an
+issue's current ready-label lifecycle, identified by `READY_LABEL_TIMESTAMP`. A missing,
+malformed, unreadable, or timestamp-mismatched record resets safely to zero and can be overwritten,
+so a newly re-queued issue cannot inherit attempts from an earlier lifecycle. The counter is read
+and incremented only in the **normal dispatch path** — the code path reached when
 no quota-pause marker is present. Quota-pause cycles (marker → resume → re-pause) bypass this path
 entirely, so a quota death never burns a retry slot. Only genuine attempt starts (fresh dispatches
 and retries after non-quota failures) advance the counter. The plan-approval path also bypasses
 the counter — the first implementation dispatch after plan approval is always free.
+
+If PRauto cannot persist a current-lifecycle counter, it posts no heartbeat and dispatches no
+agent; it leaves the issue pending for a later wake.
 
 At `PRAUTO_MAX_RETRIES_PER_JOB` (default 4), the issue is abandoned. The counter is checked
 **before** incrementing: a dispatch at count 3 with max 4 checks `3 >= 4` → false → proceeds
@@ -319,9 +325,10 @@ claim comment.
 
 ### Issue restart protocol
 
-To restart an issue: remove all `prauto:` labels except `prauto:ready`, unassign worker, delete
-working branch/PR. The ready-label timestamp ensures all comment-scanning functions
-automatically ignore stale comments from previous attempts.
+To restart an issue: remove all `prauto:` labels, then apply a fresh `prauto:ready` label,
+unassign the worker, and delete the working branch/PR. The fresh ready-label timestamp establishes
+a new comment and retry lifecycle, so comment-scanning functions automatically ignore stale
+comments and the retry counter cannot inherit attempts from the previous lifecycle.
 
 ---
 

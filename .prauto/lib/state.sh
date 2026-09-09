@@ -210,37 +210,75 @@ complete_job() {
 # Quota-pause cycles do not reach the normal dispatch path, so a state-file
 # counter correctly tracks only genuine attempt starts. The counter is checked
 # and incremented in heartbeat.sh's normal dispatch; a resume is a continuation,
-# not a new attempt.
+# not a new attempt. Records are scoped to the current prauto:ready label event:
+# re-queueing an issue creates a fresh retry lifecycle even though its number is
+# unchanged.
 
 # retry_count_file <issue_number> — path to the counter state file.
 retry_count_file() {
-  printf '%s/retry-count-%s.json' "$STATE_DIR" "$1"
+  local issue_number="$1"
+  [[ "$issue_number" =~ ^[0-9]+$ ]] || return 1
+  printf '%s/retry-count-%s.json' "$STATE_DIR" "$issue_number"
 }
 
 # read_retry_count <issue_number>
-# Sets RETRY_COUNT (0 when the file is absent or unreadable).
+# Sets RETRY_COUNT. A missing, malformed, or different-ready-lifecycle record
+# deliberately yields zero; increment_retry_count will replace it atomically.
 read_retry_count() {
-  local issue_number="$1" cf
+  local issue_number="$1" cf ready_ts
   cf=$(retry_count_file "$issue_number") || { RETRY_COUNT=0; return 0; }
-  RETRY_COUNT=$(jq -r '.count // 0' "$cf" 2>/dev/null) || RETRY_COUNT=0
-  RETRY_COUNT=${RETRY_COUNT:-0}
+  ready_ts="${READY_LABEL_TIMESTAMP:-}"
+
+  # A retry counter without a lifecycle anchor is never safe to reuse.
+  if [[ -z "$ready_ts" ]]; then
+    RETRY_COUNT=0
+    return 0
+  fi
+
+  RETRY_COUNT=$(jq -er \
+    --argjson issue_number "$issue_number" \
+    --arg ready_label_timestamp "$ready_ts" '
+      select(
+        (.issue_number | type) == "number"
+        and .issue_number == $issue_number
+        and (.count | type == "number" and . >= 0 and floor == .)
+        and (.ready_label_timestamp | type) == "string"
+        and (.ready_label_timestamp != "")
+        and .ready_label_timestamp == $ready_label_timestamp
+      )
+      | .count
+    ' "$cf" 2>/dev/null) || RETRY_COUNT=0
 }
 
 # increment_retry_count <issue_number>
 # Increment the current retry count by one, persist it atomically, and set
 # RETRY_COUNT to the new value so callers can use it directly.
 increment_retry_count() {
-  local issue_number="$1" cf new_count
+  local issue_number="$1" cf new_count ready_ts
   cf=$(retry_count_file "$issue_number") || return 1
+  ready_ts="${READY_LABEL_TIMESTAMP:-}"
+  [[ -n "$ready_ts" ]] || {
+    warn "Cannot increment retry count for #${issue_number}: missing ready-label timestamp"
+    RETRY_COUNT=0
+    return 1
+  }
   read_retry_count "$issue_number"
   new_count=$((RETRY_COUNT + 1))
   local tmp_file
   tmp_file=$(mktemp "${cf}.tmp.XXXXXX") || return 1
-  jq -n \
+  if ! jq -n \
     --argjson issue_number "$issue_number" \
     --argjson count "$new_count" \
+    --arg ready_label_timestamp "$ready_ts" \
     --arg last_updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{issue_number: $issue_number, count: $count, last_updated: $last_updated}' \
-    > "$tmp_file" && mv -f "$tmp_file" "$cf"
+    '{issue_number: $issue_number, count: $count, ready_label_timestamp: $ready_label_timestamp, last_updated: $last_updated}' \
+    > "$tmp_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+  if ! mv -f "$tmp_file" "$cf"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
   RETRY_COUNT=$new_count
 }

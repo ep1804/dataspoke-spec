@@ -84,7 +84,7 @@ absent.
 | `PRAUTO_WORKER_ID` | (set per instance) | Instance identity — unique per worker on a shared repo |
 | `PRAUTO_AGENT` | `auto` | `claude` \| `codex` \| `auto` (Claude then Codex) |
 | `PRAUTO_OPEN_ISSUE_LIMIT` | `1` | Max open issues this worker holds concurrently |
-| `PRAUTO_MAX_RETRIES_PER_JOB` | `3` | Heartbeat-marked attempts before abandonment |
+| `PRAUTO_MAX_RETRIES_PER_JOB` | `4` | Heartbeat-marked attempts before abandonment; counted separately for each `prauto:ready` label lifecycle |
 | `PRAUTO_DEV_ENV_FILE` | `helm-charts/.env.dev` | This worker's dedicated dev-cluster env file; resolves under the repo checkout, never a worktree |
 | `PRAUTO_GITHUB_ISSUE_FROM_ORG_MEMBERS_ONLY` | `true` | Restrict `prauto:ready` pickup to org members |
 | `PRAUTO_GITHUB_EXPECTED_ACTOR` | (optional) | The GitHub login the executor must authenticate as; the executor aborts if `gh api user` resolves to anything else — the guard against a comment/label/assignee being attributed to the keyring account instead of the worker |
