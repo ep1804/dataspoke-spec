@@ -98,6 +98,8 @@ helm-charts/
 │   └── charts/                          # bitnami pg/redis, apache-airflow (resolved deps)
 ├── prod-prereq/                         # cluster-scoped prerequisites a cluster-admin
 │                                        #   applies before the release (StorageClass)
+├── registry-cleanup/                    # container-registry retention policy, applied once by
+│                                        #   an operator, outside the Helm release
 └── dev-peripherals/                     # dev-only values + manifests + charts
     ├── nginx-ingress/values.yaml
     ├── datahub/
@@ -1052,6 +1054,15 @@ credentials into the env file, creating the namespace (behind
 removes all three, which is what makes it safe to run against a live prod
 deployment as an audit.
 
+`helm-charts/README.md` carries the complete flags table; two of those flags
+are decisions rather than mechanics. `--values` defaults to
+`helm-charts/values-prod.yaml` when that file exists. `--namespace` and
+`--secret-name` retarget the run at another deployment's namespace or
+Secret; pair them with `--verify-only`, since without it the run still
+populates the env file from, and creates the credentials Secret at, the
+overridden target. `install.sh` has no counterpart to either, so a command
+using them must never be handed on as the install command.
+
 Seven stages, announced `<n>/7`, with populate third:
 
 | # | Stage | Must hold |
@@ -1391,6 +1402,15 @@ frontend}) is the unified entrypoint. It dispatches on
   require root for the daemon socket.
 - empty → local `docker build` + `docker push`.
 
+**Registry retention.** Every `build-image.sh` run pushes a new digest under a
+mutable tag, so the previous digest keeps its storage but loses its tag — an
+unmanaged registry accumulates one orphaned version per build indefinitely.
+`helm-charts/registry-cleanup/` holds the retention policy, one file per
+registry vendor (selected by `DATASPOKE_KUBE_CLOUD_VENDOR`; GCP authored, AWS's
+ECR lifecycle-policy equivalent not yet authored), applied once by an operator
+outside the Helm release. See `helm-charts/registry-cleanup/README.md` for the
+policy detail.
+
 **Parallelism**: the install script's bootstrap phase runs all three image
 builds with bash `&`/`wait`, optionally alongside the DataHub and Langfuse
 installs (~10-minute concurrent path vs ~20-minute serial). Image build
@@ -1596,7 +1616,7 @@ Writes to .env.dev: `DATASPOKE_DEV_DATAHUB_GMS_URL`
 (generated PAT), `DATASPOKE_DEV_DATAHUB_KAFKA_BROKERS`,
 `DATASPOKE_DEV_DATAHUB_FRONTEND_URL` (browser-facing UI URL).
 
-**Google OIDC SSO**: `helm-charts/dev-peripherals/datahub.sh` configures DataHub's
+**Google OIDC SSO**: `helm-charts/bin/dev-peripherals/datahub.sh` configures DataHub's
 frontend to authenticate users via the same Google OAuth client as DataSpoke.
 On a user's first DataHub login, DataHub just-in-time provisions their corpuser,
 yielding `urn:li:corpuser:<email>` — the URN DataSpoke addresses from its own
@@ -2423,7 +2443,7 @@ triggerer need neither the init container nor the volume; they reach the metadat
 DB directly and never authenticate through the manager.
 
 **Pre-flight decides which credential is load-bearing — normatively, here.**
-`_check_airflow_credentials_prod` reads the *effective*
+`_resolve_effective_all_admins()` in `bin/lib/helpers.sh` reads the *effective*
 `airflow.config.core.simple_auth_manager_all_admins` — chart values merged with
 the operator overlay — rather than assuming the chart default, because the
 overlay is free to turn it back on. Two rules are **unconditional in both
