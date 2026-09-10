@@ -331,7 +331,7 @@ namespaces during partial uninstall.
 
 ## Action: reinstall
 
-There is no dedicated `reinstall.sh`, and `uninstall.sh` does not support `--components`. Reinstall by deleting the target component's Helm release / manifests directly, then re-running `install.sh --components <name>` — `install.sh` is idempotent and `helm upgrade --install` handles re-creation.
+There is no dedicated `reinstall.sh`, and `uninstall.sh --components` supports only `frontend` (see §Partial uninstall). For any other single component, reinstall by deleting the target component's Helm release / manifests directly, then re-running `install.sh --components <name>` — `install.sh` is idempotent and `helm upgrade --install` handles re-creation.
 
 **Prod has no per-component reinstall.** `--components` and `--from-component` are dev-only flags that `install.sh` rejects under `--profile prod`. A prod fix is a full cycle: `install-prod-preflight.sh --values <overlay.yaml>` then `install.sh --profile prod --image-tag <tag> --values <overlay.yaml>`. Both are idempotent, and the pre-flight verifies the existing Secret rather than rewriting it, so re-running is safe.
 

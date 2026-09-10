@@ -851,18 +851,16 @@ secrets:
   #   DATASPOKE_AIRFLOW_WEBSERVER_SECRET_KEY, DATASPOKE_AIRFLOW_JWT_SECRET,
   #   DATASPOKE_AIRFLOW_FERNET_KEY,
   #   DATASPOKE_OAUTH_STATE_SECRET, DATASPOKE_GOOGLE_OAUTH_CLIENT_SECRET
-  # install.sh (_check_airflow_credentials_prod) validates all 11 keys in prod.
+  # verify_credential_secret() in bin/lib/helpers.sh validates all 11 keys in prod.
   # Airflow signing keys are projected into chart-compatible Secrets by
   # install.sh (_ensure_airflow_key_secrets / _ensure_airflow_fernet_secret).
   # DATASPOKE_POSTGRES_USER and DATASPOKE_POSTGRES_DB are NOT in this Secret —
   # they are non-secret and live in the app ConfigMap instead (config.postgres.*
   # above), which is also where the render-time consistency guard against
   # postgresql.auth.* lives (templates/configmap.yaml). A Secret still
-  # carrying either key is a prod pre-flight failure (install.sh
-  # _check_airflow_credentials_prod), not silently ignored.
+  # carrying either key is a prod pre-flight failure (verify_credential_secret()
+  # in bin/lib/helpers.sh), not silently ignored.
   existingSecret: ""
-  # install.sh pre-creates the Secret; Helm does not template it.
-  createSecret: false
 
 # ---------------------------------------------------------------------------
 # Network policy — cross-namespace access to DataHub
