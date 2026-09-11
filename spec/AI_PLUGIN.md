@@ -78,7 +78,11 @@ The plugin lives in a `plugin/` directory, and the repository that hosts it doub
 └── plugin/
     ├── .claude-plugin/
     │   └── plugin.json        ← plugin manifest (name "dataspoke", skills)
-    ├── skills/<skill>/SKILL.md
+    ├── skills/<skill>/
+    │   ├── SKILL.md           ← concise router, workflow, and decision doctrine
+    │   └── references/*.md    ← exact feature contracts and authoring guidance
+    ├── references/
+    │   └── pagination.md      ← collection traversal shared by every skill
     ├── bin/dataspoke-api      ← auth + base-URL curl wrapper
     ├── bin/dataspoke-schema   ← OpenAPI contract lookup (filtered by path fragment)
     └── bin/datahub-graphql    ← direct-DataHub GraphQL helper (URN search)
@@ -99,6 +103,33 @@ it before authoring a request body instead of relying on shapes transcribed into
 drift. `/redoc` serves the same document as a browser-rendered reference for humans; because it
 is a client-side renderer, skills read the contract through this helper and hand `redoc_url` to
 the user.
+
+Skills use **progressive disclosure**. `SKILL.md` retains only routing, human gates,
+decision rules, and intent-to-route mappings; detailed request shapes, error tables, and
+authoring patterns live in focused `references/` documents and are loaded only for the path
+that needs them. A router gives a hard read instruction before any operation whose contract is
+owned by a reference; it does not invite the agent to reconstruct a conf from memory. Curated
+references make recurring feature work concise, while the deployment's live OpenAPI document
+remains authoritative whenever the two differ. A bare `references/…` path is skill-local
+(`skills/<skill>/references/`); the one reference shared across every skill is always written
+with its full path, `plugin/references/pagination.md`.
+
+Every skill that reads a collection follows `plugin/references/pagination.md` and consumes all
+pages needed for the user's request, never reporting a first page as the complete collection.
+Every list route carries the deployment's standard `offset`/`limit`/`total_count` envelope,
+including validation history — which is the one documented deviation from the convention: its
+end-bound parameter is named `until` rather than `to`, and its limit default and cap are raised
+above the other list routes'. [`API.md`](API.md) and the deployment's live OpenAPI document own
+the exact values and ordering. A skill traverses past a page on this route by narrowing
+`from`/`until` to the unread remainder rather than by `offset`, since the window bounds the
+result set. A validation baseline read always supplies `until` equal to the `data_time` under
+judgment, so it contains neither that point nor any future point.
+
+Skill descriptions carry literal, field-observed task phrasing in addition to capability names,
+such as “how do I write validation code for this dataset”, “add validation to this pipeline”,
+“register validation for this table”, “what validation results exist”, and “is this dataset
+ingested”. Maintained localized equivalents receive the same treatment. This phrasing is part
+of skill routing, not explanatory prose inside the skill body.
 
 ### Distribution
 
@@ -210,7 +241,9 @@ Two modes, in priority order:
 - **Author a validation routine** into the engineer's own pipeline — the differentiating
   capability, detailed below. The skill activates on pipeline-authoring context (PySpark,
   awswrangler/pandas, dbt, SQL, an Airflow task that writes a partition), including when the
-  user asks for a row-count or null check without naming validation at all.
+  user asks how to write validation code for a dataset, add validation to a pipeline, register
+  validation for a table, or asks for a row-count, null, or freshness check without ever using
+  the word "validation".
 - **Manage the validation slot** (UC2) — read / register / edit the per-dataset conf
   (`GET`/`PUT`/`PATCH`/`DELETE …/attr/validation/conf`), POST and query results
   (`POST`/`GET …/attr/validation/result`), browse the cross-dataset list
@@ -220,14 +253,21 @@ Two conf operations are destructive and the skill warns before either. `DELETE �
 hard delete: it cascades the dataset's results and `VALIDATION.*` events and removes the DataHub
 assertion, leaving the slot as never-created. Replacing a conf's `variables[]` does not migrate
 past results, which retain the keys they were posted with, so a rename orphans the existing
-series and breaks the pipeline's next POST with `422 UNKNOWN_VARIABLE`.
+series and makes any pipeline still posting the old key fail with `422 UNKNOWN_VARIABLE`.
+
+The router gives hard pointers to `references/validation-conf.md` before conf/result management
+and to `references/validation-authoring.md` before pipeline authoring, tests, or backfill. These
+references own the detailed payload and authoring patterns; the route and decision doctrine stay
+in `SKILL.md`.
 
 ### `dataspoke-governance`
 
 Guide the complete active-metric lifecycle described below: inspect the deployed contract and
 existing metrics, scaffold a definition for any built-in metric type, validate and preview the
 request, create or update only after confirmation, prefer a dry run before scheduled execution,
-and interpret results, per-dataset verdicts, events, unresolved URNs, and scope freshness.
+and interpret results, per-dataset verdicts, events, unresolved URNs, and scope freshness. Its
+router reads the curated metric reference for these operations and falls back to live OpenAPI
+as the authority when the deployment differs.
 
 ### `dataspoke-ontogen`
 
@@ -252,147 +292,152 @@ and that rejecting an approved candidate removes the editable DataHub descriptio
 
 ## Validation Routine Authoring (Flagship)
 
-The flagship capability writes data-quality validation into the pipeline the engineer is
-building — the code that runs after a partition is written and checks what landed.
+The flagship capability writes data-quality validation into the engineer's own pipeline. A
+routine may inspect a whole dataset or a newly produced partition; for pipelines that rewrite a
+trailing window, it inspects the newest **settled** partition rather than an intermediate write.
 
-It must be honest about the division of labor. DataSpoke validation is an **API for
-registration, get, and put of values**: the conf carries four sections — `description` and
-`variables` are declared by the pipeline (what it will report); `attribute` states the
-dataset's own data-arrival cadence (`cadence_unit`/`cadence_offset`), which DataSpoke reads
-back to anchor the governance `validation-score` metric's window; and the optional
-`parameter` section is opaque storage for the pipeline's own hyperparameters, which
-DataSpoke never interprets. The service stores results and emits them to DataHub. It ships
-**no computing engine** — no metric computation, no forecasting, no anomaly detection, and
-no threshold or rule evaluation. Every number, each variable and the pass/fail `score`
-alike, is computed by the pipeline on the engineer's own engine with their own credentials.
+### Default pipeline validation strategy
 
-The skill therefore authors the computing code — metrics, baseline comparison, anomaly logic,
-thresholds — and touches DataSpoke through a small, fixed set of calls: **register** and,
-once the reuse decision resolves, **annotate** the conf at setup (§1/§3), **get** the recent
-baseline, and **post** each run's result. A request to have DataSpoke
-"detect anomalies" or "enforce a threshold" is answered by writing that logic into the pipeline,
-not by implying the service evaluates it. (See `spec/feature/VALIDATION.md`.)
+Validation is selective by default. Teams add it to datasets whose failure has meaningful
+impact — for example, datasets with many downstream consumers or a direct relationship to an
+important business metric — rather than adding a token check to every dataset. The routine is
+designed from dataset-specific exploratory analysis and may use any method that fits the
+observed data. It defaults toward high recall and sensitive anomaly detection: missed alarms
+are costlier than false alarms. A human or a separately added judging agent may classify the
+detected candidates later, but no such judge is part of the baseline plugin or DataSpoke.
 
-The skill drives four phases.
+The division of labor is strict. Validation code is part of the data pipeline and runs
+there, with the pipeline's compute engine and credentials. DataSpoke neither stores nor executes
+that code. It centralizes the conf, the named intermediate measurements, and the final result;
+serves prior results as a baseline cache; and emits the accepted records to DataHub. The conf's
+`attribute` states data-arrival cadence for Governance, while its optional `parameter` section is
+opaque storage for the pipeline's own hyperparameters. A request for DataSpoke to detect an
+anomaly or enforce a threshold is therefore fulfilled by authoring pipeline code, not by
+claiming that the service evaluates it. The full service contract remains in
+[`feature/VALIDATION.md`](feature/VALIDATION.md).
 
-### 1. Prerequisite chain (strict order)
+### Guided route and human gates
 
-Each step must pass before the next; failure stops the flow with a remediation pointer.
+The skill prints the route before acting and states the current step. Design work precedes any
+write: the skill resolves the dataset and owner context, verifying access and the token's
+**effective** Editor/Admin role — a token's effective role is fixed at mint time and never rises
+on its own, and `GET /auth/me` reports only the account's current role, not the token's
+`role_snapshot`, so a `403` there means the token needs re-minting, not a retry. It confirms
+ingestion coverage, resolves the exact `dataset_urn` through DataHub search with final user
+confirmation, checks for a reusable existing conf/module before designing a new one, and measures
+candidate variables over representative history to choose a judging method per variable. Before
+the first analysis query it asks the owner for facts history cannot establish on its own — the
+representative analysis window and any unrepresentative stretch of it, calendar or
+operating-regime days needing their own modeled term, conditions that look anomalous but are
+intentional, and whether runs rewrite earlier partitions — plus downstream impact and the
+backfill horizon when the pipeline does not already answer them.
 
-1. **Access configured** — `dataspoke-access` has produced a working Editor/Admin token. A
-   token's effective role is fixed at mint time and never upgrades on its own, so this is a
-   token-freshness check, not just an account check: `GET /auth/me` reports only the account's
-   current role, not the token's.
-2. **Dataset ingested** — the target dataset exists and is covered, confirmed via
-   `GET /spoke/common/data/{dataset_urn}/attr/ingestion`. A dataset with no ingestion
-   coverage is sent back to `dataspoke-ingestion` first.
-3. **Conf registered** — a validation slot with the declared `variables` exists
-   (`GET …/attr/validation/conf`); the skill registers one via `PUT` when absent. Which
-   utility implements the check is not yet decided at this point, so naming it in
-   `description` is §3's job, not this step's.
+The resulting plan is presented and reviewed by the user before any conf write or code: it names
+the validation target, the judging method and rationale per criterion, the conf shape, cadence,
+scoring denominator, cold-start behavior, backfill range, and the pipeline insertion point. Only
+after approval is the conf created or replaced through the public API; registration is a setup
+action, never generated into the recurring pipeline code, and it must not happen before reuse and
+history analysis have settled the design. The stored conf is then read back and compared against
+the approved plan a second time — description, variable names and order, parameter names and
+values, and cadence. **The plan review and the conf review are distinct human gates and are never
+combined into one step.**
 
-### 2. `dataset_urn` resolution
+Implementation and unit testing follow the second gate, then a single real partition is run and
+its result read back and compared against the pipeline's own log before a backfill proceeds,
+oldest to newest, relying on the bounded baseline reads (below) to stay safe against retries and
+repeat backfills. `plugin/skills/dataspoke-validation/references/validation-authoring.md` owns the
+per-step authoring detail, including the owner-question set, test coverage, and the backfill
+checklist.
 
-The engineer rarely knows the exact URN. The skill resolves it carefully, never guessing:
+Registering a conf can make a watched `validation-score` metric look worse before it looks better:
+the dataset moves from unconfigured/unknown into the configured denominator, but only counts as
+`valid_in_time` once its single latest result overall lands inside the cadence-anchored window at
+`score >= 1.0` ([`feature/BACKEND.md` §Metrics Service](feature/BACKEND.md#metrics-service-srcbackendmetrics)
+— the metric never searches backward for an older qualifying row). A high-recall design compounds
+this: a sensitive check that fires on a genuine false alarm, and any criterion still inside its
+cold-start warm-up (below), both hold the dataset below `1.0` and therefore out of
+`valid_in_time` for as long as they do. The skill discloses both effects before the conf write
+rather than leaving them to be rediscovered as a governance surprise.
 
-1. **Gather hints** — scan the engineer's workspace (pipeline scripts, configs) for
-   platform / schema / table signals.
-2. **Confirm with the user** — restate the inferred platform + schema + table and get
-   explicit agreement before any lookup.
-3. **Resolve via DataHub search** — query DataHub's GraphQL endpoint **directly** through
-   the `datahub-graphql` plugin helper, which posts a search query to `<datahub_gms_url>/graphql`
-   authenticated with the user-supplied DataHub token (§Optional DataHub access), to find
-   candidate dataset URNs matching the confirmed identifiers. When DataHub access is not yet
-   configured, the helper prompts for the GMS URL and token first.
-4. **Manual entry as a last resort** — when DataHub search returns no candidate (e.g. a
-   dataset not yet search-indexed), the skill accepts a user-supplied URN, never defaulting
-   to manual entry while search is viable.
-5. **Double-check** — present the resolved URN back to the user for final confirmation
-   before it is used in any conf or result call. A wrong URN silently writes to the wrong
-   dataset, so this confirmation is mandatory.
+### Data-first method selection
 
-### 3. Check for reuse before authoring
+There is no universal default check. The design starts from measured history and an open method
+set. The following vocabulary is illustrative, not a required classification:
 
-Before writing new check logic, the skill searches for an existing implementation rather
-than assuming none exists: `GET /spoke/validation?coverage=covered` surfaces other datasets'
-registered confs, whose `description` conventionally names the implementing module so a
-match is recognizable, and the skill also searches the user's own shared/validation package
-in their workspace. Once this step resolves which utility implements the check — an existing
-one being reused, or a new one about to be authored in §4 — the skill names it in the conf's
-`description`, via `PATCH …/attr/validation/conf`, so the convention this very search relies
-on stays accurate for the next dataset. When an existing utility already covers the check,
-the skill wires that utility into the pipeline rather than re-authoring the logic.
+| Method | Suitable evidence | Earliest honest judgment |
+|---|---|---|
+| Invariant | A guarantee such as zero orphan rows or zero duplicate keys | First target, without history |
+| Forecast | A level whose expected range changes with time or calendar | After the chosen model's minimum history |
+| Relation | Measurements that should move together, such as a stable ratio | After enough paired observations |
 
-This makes one ordering invariant load-bearing on both paths, a freshly authored check and a
-reused one alike: **the conf is registered before the pipeline ever calls the utility.**
-Skipping it does not fail loudly — §4's failure-policy invariant means the utility's entry
-point never raises, so a call against an unregistered dataset is caught into a logged
-warning locally rather than an exception, and the pipeline task completes as if it had
-validated while nothing reaches DataSpoke's history.
+Stable candidate ranking — including weekday-adjusted residual spread where its mathematical
+preconditions hold — is one analysis technique among several for choosing a judging method.
+Prophet-based row-count forecasting is one forecast example chosen from measured history, not a
+starting proposal for an unexplored dataset. A recurring special day — a calendar or
+operating-regime day — receives an explicit modeled term once enough prior occurrences exist, and
+the plan exposes the resulting additional warm-up period. A volume criterion may be retained
+beside stable ratios because proportional loss can leave ratios unchanged.
 
-### 4. Generate the routine
+Each new validation implementation receives a unique, stable module code name before its first
+result. That name is a convention in the user's pipeline and the reuse catalogue, not DataSpoke
+result identity: DataSpoke keys the slot by dataset and collapses results by `data_time`. Renaming
+the module can still sever local reuse assumptions and the module's interpretation of its prior
+measurements, so it is treated as a versioning decision. The conf `description` identifies the
+module, the whole-dataset or settled-partition target, and the pass condition, using the form
+already visible in the deployment's live confs. Variable names and scoring semantics are likewise
+stable once results exist.
 
-The skill emits code **into the engineer's own codebase** (their environment, their
-credentials — never DataSpoke's). What it generates has two parts, and only one of them is
-dataset-specific:
+Checks are isolated by default. Adding one does not extract a shared engine from an existing
+working check unless the user asks for that refactor separately; when they do, unchanged outputs
+from the existing check are an explicit acceptance condition.
 
-- **A reusable utility**, placed in the user's own shared package rather than inline in the
-  pipeline script, so it is callable across datasets and pipelines. It owns metric
-  computation, baseline fetch, scoring, and outage handling around the DataSpoke calls — the
-  logic §3's reuse-check searches for.
-- **Dataset-specific wiring**, kept in the pipeline script itself: `dataset_urn` resolution
-  (§2) and the call into the utility with that URN and the partition being validated.
+### Result and failure semantics
 
-The utility:
+The pipeline derives the total criterion count from the configured criterion groups. Every
+criterion contributes equally to the score unless the approved plan says otherwise, and the
+denominator is never a separately maintained constant. A criterion that cannot be judged counts
+as non-passing under the current score semantics. This makes cold start visible: history-free
+invariants may pass on the first target, while forecast, relation, or calendar-regime criteria
+remain breaches until their minimum evidence exists. The plan states the resulting score floors
+and the observation at which each layer can first pass.
 
-1. Computes the declared metrics over the partition just written. Only this step is
-   engine-specific; the skill adapts it to the stack in front of it (a Spark aggregation, an
-   aggregation pushed into Athena, plain SQL). It validates what actually landed — re-reading
-   the destination partition rather than reusing the in-memory frame, since the two diverge
-   exactly when the write went wrong.
-2. Fetches the recent baseline via `GET …/attr/validation/result?from=<~14d ago>` (the
-   historical-result cache; newest-first, so index 0 is the latest sample).
-3. Fits a forecast over that baseline or applies whatever comparison the engineer specifies,
-   deriving expected ranges. When the user has not named a specific check, the skill's named
-   default suggestion is a per-partition row-count anomaly check via Prophet forecasting
-   (default settings).
-4. **Decides the `score`** in pipeline code — pass/fail (or a fractional value) from the
-   computed metrics versus the forecast/baseline.
-5. POSTs `{data_time, score, variables}` to `…/attr/validation/result`, keying `variables`
-   by the conf's declared names (unknown keys are rejected `422 UNKNOWN_VARIABLE`;
-   `score` must satisfy `0.0 ≤ score ≤ 1.0`).
+Historical baselines are time-bounded, not row-count-bounded. A read uses `from` for the intended
+lookback and `until=<data_time being judged>`; missing optional variable values in otherwise valid
+history reduce that variable's usable sample count rather than aborting the whole result. The
+routine posts the logical target time as `data_time`, never the execution timestamp: for a
+partition target this is the partition's own timestamp, and for a whole-dataset target it is the
+as-of boundary of the inspected snapshot on the dataset's declared cadence grid — never the run
+instant, which would make every run a distinct point and defeat baseline collapse. For a rewritten
+window, the scored partition named in the conf and the conf's `cadence_unit`/`cadence_offset` tell
+the same arrival story so Governance does not classify a deliberately older settled slice as
+stale.
 
-Registration stays out of the generated code, on both the freshly authored and the reused
-path (§3). A conf re-registered on every run is a recurring opportunity to change the
-declared variables underneath the accumulated history, so the skill performs the `PUT`
-itself during the prerequisite chain.
+A score below `1.0` carries an optional `score_note` explaining the result, capped at 200
+characters by the API contract. Generated routines add stricter conventions on top of that cap —
+single-line plain text with no tab or newline, built from controlled criterion names, and safely
+truncated when a long breach list would not otherwise fit
+(`plugin/skills/dataspoke-validation/references/validation-conf.md` owns the exact construction
+rule). It is explanatory only, is not declared in the conf, and never affects scoring. A clean
+pass normally omits it.
 
-**The failure-policy invariant**: the utility's entry point never raises out of itself. That
-single guarantee plays out as two different outcomes, depending on whether the POST can
-actually land. When the dataset's conf is registered and DataSpoke is reachable, a scoring
-bug or a bad partition becomes a posted `0.0` in the history rather than an exception that
-fails the pipeline task. When the POST cannot land — DataSpoke unreachable, or the conf
-missing (the case §3's registration ordering guards against) — the failure is logged locally
-instead, and nothing reaches DataSpoke's history at all. The recorded case is the deliberate
-trade-off: for a dataset whose conf is registered, the governance `validation-score` metric
-(`spec/feature/BACKEND.md` §Metrics Service) is the backstop — a dataset whose latest result
-scored `< 1.0` drops out of `valid_in_time` and surfaces as a failing verdict, so raising
-inside the routine buys nothing that metric doesn't already catch, at the cost of a failed
-pipeline task. That backstop does not cover a dataset whose conf was never registered — it is
-not evaluated at all rather than counted as failing — which is exactly why §3's registration
-ordering is load-bearing rather than a nicety.
+The routine distinguishes an expected inability to judge data from a software failure:
 
-Two properties of the result store shape what the routine may assume. Reads collapse
-last-write-wins per `data_time`, so a retried run corrects its partition rather than duplicating
-it and no deduplication guard belongs in the generated code. But collapsing is keyed on
-`data_time` alone, not on the day: the series carries one point per distinct `data_time`, so the
-baseline must be bounded by the time window rather than by a row count, and `data_time` must
-identify the partition — never the moment of the run, which would make every retry a new point
-and silently reduce a multi-day window to a handful of hours.
+| Condition | Pipeline-visible outcome |
+|---|---|
+| Valid computation, including expected insufficient evidence | Post the derived score; unjudgeable criteria count as non-passing and the note explains why |
+| Interrupted or unsuccessful result POST whose commit state is not authoritatively known | Read the bounded history for the exact `data_time` and compare the complete expected result before deciding whether to retry |
+| Contract/configuration rejection | Log an integration defect; do not fabricate a quality score |
+| Unexpected validation-code defect | Log a software defect; do not relabel it as a bad-data verdict |
 
-The skill makes the boundary explicit in what it generates and explains: forecasting and
-thresholding are **the pipeline's** logic, authored locally; DataSpoke receives only the
-final numbers.
+The public validation entry point contains these failures so the auxiliary check does not fail the
+data-production task, but containment never turns a programmer error into `0.0`. Conf registration
+before execution and the two review gates minimize the silent no-result cases. Result reads reflect
+DataSpoke's last-write-wins view for retries at the same `data_time`; a retry corrects that logical
+point without permitting it into its own baseline. A status code or transport interruption does
+not by itself establish whether a row landed unless the public contract explicitly says so. The
+reconciliation read uses a half-open range containing only the attempted `data_time` and compares
+`data_time`, `score`, the complete `variables` map, and `score_note`; a matching row is already
+delivered, while an absent or different row informs the retry decision.
 
 ---
 
@@ -462,13 +507,13 @@ only through the public `/spoke/governance/…` routes and never substitutes dat
 cluster, or admin access for a missing public capability.
 
 The deployment's live OpenAPI document is authoritative for request schemas, enum values, and
-route availability. The skill consults it through `bin/dataspoke-schema` before preparing a
-write. YAML is solely the human-facing guide and authoring representation: samples and working
-definitions may be shown or edited as YAML, but each definition-bearing `POST`, `PUT`, or `PATCH`
-request uses `Content-Type: application/json` and a JSON body produced by a lossless conversion.
-`GET` and bodyless `DELETE` requests remain governed by live OpenAPI. Before a write, the skill
-shows derived JSON when the operation carries a body
-rather than implying that YAML is accepted by the API.
+route availability. The skill first reads its curated `references/governance-metric.md` for the
+route map, definition fields, built-in series, filter rules, and error interpretations, then
+consults live OpenAPI through `bin/dataspoke-schema` before preparing a write and whenever the
+deployment differs. JSON is the primary authoring representation because it is the format the API
+accepts. If the user supplies YAML, the skill converts it losslessly, shows both representations,
+and verifies that their parsed trees match before sending the JSON body. `GET` and bodyless
+`DELETE` requests remain governed by live OpenAPI.
 
 ### Guided flow
 
@@ -477,32 +522,56 @@ The lifecycle proceeds in this order:
 1. **Inspect** — verify access and effective role, load the governance fragment from live
    OpenAPI, and list or read existing metrics before deciding whether the requested identity is
    new or existing.
-2. **Scaffold** — offer an editable YAML definition for the selected built-in type. The guide
+2. **Scaffold** — offer an editable JSON definition for the selected built-in type. The guide
    explains its valid `metrics[].name` series, type-specific `metric_conf`, scheduling behavior,
-   and `dataset_filter`; it includes a usable example for each built-in type.
-3. **Validate and preview** — convert the YAML losslessly to JSON, validate the JSON against the
-   live contract and relevant cross-field constraints, and display the exact method, public
-   route, and JSON body. Validation includes create-only `metric_id`, type-appropriate series and
-   configuration, filter syntax accepted by the API, and the distinction between a disabled
-   definition and an enabled schedule.
-4. **Choose create or update** — create a missing metric with `POST /spoke/governance/metric`;
-   update an existing metric at `.../{metric_id}/attr/conf`. The skill does not use update as an
-   implicit upsert: full replacement and partial update remain explicit choices matching the
-   live contract.
-5. **Confirm and apply** — require explicit user confirmation immediately before any definition
-   write, delete, enabling of scheduled execution, or non-dry run. The confirmation identifies
-   the metric, operation, scope, schedule effect, and exact JSON payload where applicable.
-6. **Exercise safely** — recommend an on-demand `?dry_run=true` after creation or a material
-   definition change and before enabling its schedule. A dry run is presented as evaluation
-   without persisted results or verdict replacement, not as a write-validation endpoint.
-7. **Interpret** — read result timeseries, per-dataset verdicts, and lifecycle events together.
+   and `dataset_filter`; it includes a usable example for each built-in type. A new metric is
+   scaffolded with `is_enabled: false` so scope can be inspected before scheduled execution.
+3. **Preflight, validate, and preview** — validate the JSON against the live contract and relevant
+   cross-field constraints, confirm the user's metric-type and scope intent, and display the exact
+   method, public route, and JSON body. For a create, establish client-supplied kebab-case
+   `metric_id` availability with a direct GET. Validation covers type-appropriate series and
+   configuration, filter grammar accepted by the API, and the distinction between a disabled
+   definition and an enabled schedule. No public pre-create route resolves an arbitrary new
+   filter or enumerates whether its tag and URN literals exist, so this step does not claim a
+   semantic scope preview.
+4. **Confirm and create or update** — require explicit user confirmation before the definition
+   write. Create a missing metric, disabled, with `POST /spoke/governance/metric`. An update that
+   changes `dataset_filter` or can otherwise change the resolved scope atomically writes the
+   changed definition with `is_enabled: false` at `.../{metric_id}/attr/conf`; it never leaves the
+   prior schedule enabled against an unreviewed scope. The skill does not use update as an implicit
+   upsert: full replacement and partial update remain explicit choices matching the live contract.
+5. **Inspect the resolved scope** — after a create or scope-changing update, page through
+   `GET /spoke/governance/metric/{metric_id}/dataset` and show the resolved dataset set and its
+   scope-relative `attrs_synced_at`. An empty or unintended scope returns to an explicitly
+   confirmed definition edit; the skill does not proceed to a dry run or enablement on an
+   unreviewed scope.
+6. **Exercise safely** — run an on-demand `?dry_run=true` after the scope review and before
+   enabling or re-enabling the schedule. A dry run is presented as evaluation without persisted
+   results or verdict replacement, not as a write-validation endpoint.
+7. **Enable deliberately** — require a fresh confirmation before enabling scheduled execution,
+   deleting a definition, or running non-dry. The confirmation identifies the metric, operation,
+   reviewed scope, schedule effect, and exact JSON payload where applicable.
+8. **Interpret** — read result timeseries, per-dataset verdicts, and lifecycle events together.
    Explain `true`, `false`, and `unknown` verdicts; distinguish aggregate values from client-
    derived ratios; surface `unresolved_urns`; and report `attrs_synced_at` as scope-relative
    registry freshness rather than measurement time or registry-wide freshness.
 
+An update that cannot change scope may take the shorter path: contract validation, exact payload
+preview, confirmation, and apply, without disabling and re-reviewing the unchanged dataset set.
+
 The skill reports API errors without bypassing them. In particular, it preserves create/update
 identity semantics, read-only-role rejection, disabled and concurrent-run conflicts, unsupported
 passive mode, invalid filters, and unresolved dataset literals as user-visible outcomes.
+
+The three seeded factory metrics are editable API resources, but the plugin normally recommends
+leaving them unchanged: their empty filters cover the whole registry and they serve as
+deployment-wide reference definitions. A team-specific policy is normally a new metric with a
+new client-supplied kebab-case identifier, for example `validation-score-orders`, rather than an
+edit to a factory row. This is an operating recommendation, not a prohibition; an explicit request may still edit or
+disable a factory metric as the API permits. Deleting one is not durable — the startup bootstrap
+re-inserts any missing built-in `metric_type` row, disabled with an empty filter, on the next API
+start — so disabling (`is_enabled: false`) rather than deleting is the durable way to retire a
+factory metric.
 
 ---
 
@@ -510,6 +579,3 @@ passive mode, invalid filters, and unresolved dataset literals as user-visible o
 
 - [ ] MCP promotion criteria — which (if any) skill warrants a structured MCP tool surface
       over the curl-wrapper approach.
-- [ ] Forecast library choice in generated routines — Prophet is the default example;
-      whether to template alternatives (statsmodels, simple rolling thresholds) per user
-      preference.

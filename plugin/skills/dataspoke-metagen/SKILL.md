@@ -1,6 +1,6 @@
 ---
 name: dataspoke-metagen
-description: "Operate DataSpoke Metadata Generation (UC4) on a deployed instance: manage named generation configurations and per-dataset boundaries, dry-run and run generation, inspect coverage and candidates, and review documentation proposals. Use for AI documentation proposals, metadata generation, description candidates, or metadata review."
+description: "Operate DataSpoke Metadata Generation (UC4) on a deployed instance: manage named generation configurations and per-dataset boundaries, dry-run and run generation, inspect coverage and candidates, and review documentation proposals. Triggers on AI documentation proposals, metadata generation, description candidates, metadata review, 'generate descriptions for this dataset', 'review AI-written descriptions', and the equivalent phrasing in the user's own working language."
 allowed-tools: Read, Bash(dataspoke-api *), Bash(dataspoke-schema *), AskUserQuestion
 ---
 

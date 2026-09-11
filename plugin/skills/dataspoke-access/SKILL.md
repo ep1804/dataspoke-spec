@@ -1,6 +1,6 @@
 ---
 name: dataspoke-access
-description: Connect this plugin to a deployed DataSpoke and verify access. Use to point Claude at a DataSpoke deployment (API base URL + dsk_ API token), mint a token from email/password, or check who you are and what role you hold. Prerequisite for every other dataspoke-* skill — run this first, or when calls start returning 401.
+description: Connect this plugin to a deployed DataSpoke and verify access. Use to point Claude at a DataSpoke deployment (API base URL + dsk_ API token), mint a token from email/password, or check who you are and what role you hold. Prerequisite for every other dataspoke-* skill — run this first, or when calls start returning 401. Triggers on "connect to DataSpoke", "what role do I have", and the equivalent phrasing in the user's own working language.
 argument-hint: "[set | status]"
 allowed-tools: Read, Write, Bash(dataspoke-api *), Bash(curl *), Bash(chmod *), Bash(mkdir *), Bash(python3 *), AskUserQuestion
 ---

@@ -35,7 +35,7 @@ For local development against a checkout: `/plugin marketplace add ./` then
 |-------|--------------|
 | `dataspoke-access` | Connect to / verify a deployment; mint & store a `dsk_` token. **Run first.** |
 | `dataspoke-ingestion` | Manage ingestion sources (UC1): list, create/edit, dry-run + run, check results. |
-| `dataspoke-validation` | Write validation into your pipeline (UC2, flagship) — metrics, baseline, scoring, and the DataSpoke calls. Also manages validation slots directly. |
+| `dataspoke-validation` | Write validation into your pipeline (UC2, flagship) — designs a judging method from your dataset's measured history, then generates the metrics, baseline, scoring, and DataSpoke calls. Also manages validation slots directly. |
 | `dataspoke-ontogen` | Manage Ontology Generation (UC3): singleton conf, Markdown seeds, dry-run + inference runs, result/event inspection, and node → edge → triple review. |
 | `dataspoke-metagen` | Manage Metadata Generation (UC4): named confs, dataset opt-in boundaries, dry-run + generation runs, coverage, candidates, and global mutable review. |
 | `dataspoke-governance` | Manage Governance metrics (UC5): define active metrics, dry-run + evaluate, and inspect trends, scoped datasets, and events. |
@@ -91,20 +91,47 @@ dataspoke-schema ingestion/sources           # those operations + their resolved
 `/redoc` is the same document rendered **for humans** to browse — its URL is stored as
 `redoc_url`. It is a browser page, not a readable source: skills use `dataspoke-schema`.
 
+## Skill-local references
+
+Two skills split their detailed contract and authoring guidance out of `SKILL.md` into a
+`references/` folder, loaded only when that path is actually needed — `SKILL.md` itself stays a
+router (routing, human gates, decision rules):
+
+```
+skills/dataspoke-validation/
+├── SKILL.md
+└── references/
+    ├── validation-conf.md          ← conf/result body contract, description convention, errors
+    └── validation-authoring.md     ← open method set, scoring, worked example, wiring, tests
+skills/dataspoke-governance/
+├── SKILL.md
+└── references/
+    └── governance-metric.md        ← route map, definition fields, filter grammar, JSON scaffolds
+references/
+└── pagination.md                   ← collection traversal shared by every skill
+```
+
 ## A note on validation
 
 DataSpoke validation is an **API for registration, get, and put of values** — it ships no
-computing engine. There is no metric computation, no forecasting, no anomaly detection, and no
-threshold or rule evaluation inside DataSpoke. A conf carries four sections: `description` and
-`variables` declare what the pipeline will report; `attribute` states the dataset's data-arrival
-cadence, read back by the governance `validation-score` metric; `parameter` is optional opaque
-storage for the pipeline's own hyperparameters. Your pipeline computes every number, including
-the pass/fail `score`, and POSTs `{data_time, score, variables}`. DataSpoke stores the history
-and emits the result to DataHub as an assertion.
+computing engine, and it never stores or executes the check logic itself. There is no metric
+computation, no forecasting, no anomaly detection, and no threshold or rule evaluation inside
+DataSpoke. A conf carries four sections: `description` and `variables` declare what the pipeline
+will report; `attribute` states the dataset's data-arrival cadence, read back by the governance
+`validation-score` metric; `parameter` is optional opaque storage for the pipeline's own
+hyperparameters. Your pipeline computes every number, including the `score`, and POSTs
+`{data_time, score, variables, score_note?}`. DataSpoke stores the history and emits the result to
+DataHub as an assertion.
 
 That division of labor is the point: `dataspoke-validation` writes the computing code — metrics,
-baseline comparison, anomaly logic, thresholds — into *your* pipeline (or, for a reusable check,
+baseline comparison, judging logic, thresholds — into *your* pipeline (or, for a reusable check,
 your own shared package), where it runs on your engine with your credentials. It touches
-DataSpoke only to **register** and, once it knows which utility implements the check,
-**annotate** the conf's `description` at setup, **get** the recent baseline, and **post** each
-run's result.
+DataSpoke only to **register**, **get** the recent baseline, and **post** each run's result.
+
+Validation is **selective by design** — teams add it to datasets whose failure has real downstream
+impact, not to every dataset as a matter of course — and there is no single flagship default check
+to suggest before looking at the data. The routine's judging method (invariant, forecast, relation,
+or a mix) is chosen from the dataset's own measured history, biased toward high recall: a missed
+alarm costs more than a false one, and a separate human or judging agent may triage flagged
+candidates downstream, outside this plugin's scope. A criterion the routine cannot yet judge counts
+against the score rather than being reported as a clean pass — there is no cold-start sentinel.

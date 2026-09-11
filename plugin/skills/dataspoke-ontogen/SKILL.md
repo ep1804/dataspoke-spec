@@ -1,6 +1,6 @@
 ---
 name: dataspoke-ontogen
-description: "Operate DataSpoke Ontology Generation (UC3) on a deployed instance: configure the singleton, curate Markdown seeds, dry-run and run inference, inspect events and ontology results, and review nodes, edges, then eligible triples. Use for ontology inference, business concepts, relationships, ontology seeds, or ontology review."
+description: "Operate DataSpoke Ontology Generation (UC3) on a deployed instance: configure the singleton, curate Markdown seeds, dry-run and run inference, inspect events and ontology results, and review nodes, edges, then eligible triples. Triggers on ontology inference, business concepts, relationships, ontology seeds, ontology review, 'how do I generate the business ontology', 'review pending ontology proposals', and the equivalent phrasing in the user's own working language."
 allowed-tools: Read, Write, Bash(dataspoke-api *), Bash(dataspoke-schema *), AskUserQuestion
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: dataspoke-ingestion
-description: Manage DataSpoke ingestion sources (UC1) on a deployed instance — list and inspect sources, create or edit ACTIVE_CUSTOM_MANAGED and PASSIVE sources, trigger dry-run and real extractor runs, and review run history, emitted datasets, and the unmanaged bucket. Use for any "register/check ingestion" or "is this dataset ingested" question. Answers questions and, on request, writes and fires the API calls.
+description: Manage DataSpoke ingestion sources (UC1) on a deployed instance — list and inspect sources, create or edit ACTIVE_CUSTOM_MANAGED and PASSIVE sources, trigger dry-run and real extractor runs, and review run history, emitted datasets, and the unmanaged bucket. Triggers on "register/check ingestion", "is this dataset ingested", "how do I add a new data source", "why isn't this table showing up in DataSpoke", "run this ingestion source", and the equivalent phrasing in the user's own working language. Answers questions and, on request, writes and fires the API calls.
 argument-hint: "[question or action]"
 allowed-tools: Read, Write, Bash(dataspoke-api *), Bash(dataspoke-schema *), AskUserQuestion
 ---
