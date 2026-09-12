@@ -1,7 +1,7 @@
 ---
 name: prauto-executor
 description: "Use when running or debugging the DataSpoke PRauto worker."
-version: 4.1.0
+version: 4.2.0
 author: DataSpoke (dataspoke-baseline)
 license: MIT
 platforms: [macos, linux]
@@ -90,6 +90,7 @@ must:
 | `Claude auth check failed.` | Claude CLI logged out (`claude auth login` fixes it) |
 | `waiting for plan approval` | Waiting on a human, not quota |
 | `quota-paused (claude). Waiting.` | Quota-paused; resumes next window |
+| `Codex model/effort override is invalid. No dispatch this wake.` | Bad `PRAUTO_CODEX_MODEL`/`PRAUTO_CODEX_EFFORT` pair; no dispatch, no retry burned |
 
 ## Manual tick
 
@@ -103,6 +104,20 @@ spamming Slack, run the monitor in the foreground with `PRAUTO_MONITOR_DRY_RUN=1
   (`.prauto/state/retry-count-<issue>.json`) increments only in the normal dispatch path —
   quota-pause cycles short-circuit before it, so quota deaths never burn retry slots. A
   resume is a continuation, not a new attempt. `PRAUTO_MAX_RETRIES_PER_JOB` defaults to 4.
+- **A wake can legitimately end without `Heartbeat complete.`** Two early-exit paths return before
+  that marker: `No coding agent available this wake.` (agent probe failed) and `Codex model/effort
+  override is invalid. No dispatch this wake.` (a `PRAUTO_CODEX_MODEL`/`PRAUTO_CODEX_EFFORT` pair that
+  failed preflight — both must be set together; valid models are `gpt-5.6`/`gpt-5.6-terra`/
+  `gpt-5.6-luna`, valid efforts `low|medium|high|xhigh|max|ultra`, and bare aliases like `terra` are
+  rejected). The monitor's classifier only recognizes the first one (`no-agent`); it reports the
+  second as "task exited unexpectedly". Read the log tail instead of trusting that Slack line. Both
+  are inert while `PRAUTO_AGENT=claude`.
+- **A code-affecting branch gates on a full post-PR regression.** The executor provisions and
+  *retains* its dev cluster through PR creation and every regression rerun — tearing it down only at
+  heartbeat exit — then runs the full static + unit + spot + api-wired + E2E suites against the exact
+  pushed PR head, keeping the issue and PR in `prauto:wip` until it passes, bounded by
+  `PRAUTO_REGRESSION_FIX_MAX_RETRIES` (default 2). Budget for long wakes and a cluster that stays up;
+  a diff confined to the executor's non-code exclusion set is exempt.
 - **Do not do the tick's work in the supervisor.** Claim, phase derivation, dispatch, and
   finalize are the executor's. The supervisor only launches and monitors.
 - **Detach via `launch.sh`, never `nohup &`.** The Hermes terminal tool blocks shell-level
