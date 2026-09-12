@@ -83,8 +83,9 @@ must:
 | Marker | Meaning |
 |---|---|
 | `Lock acquired (PID …)` | Executor started |
-| `Dispatching issue #N (phase: X, attempt: Y/Z)` | A coding agent is about to run |
+| `Dispatching issue #N (phase: X, attempt: Y/Z)` | A coding agent is about to run (retry counter from state file) |
 | `Heartbeat complete.` | Tick finished |
+| `Issue #N exceeded max retries (M/Z).` | Local retry counter hit PRAUTO_MAX_RETRIES_PER_JOB; issue abandoned |
 | `No coding agent available this wake.` | No agent passed the probe (auth/quota) |
 | `Claude auth check failed.` | Claude CLI logged out (`claude auth login` fixes it) |
 | `waiting for plan approval` | Waiting on a human, not quota |
@@ -98,6 +99,10 @@ spamming Slack, run the monitor in the foreground with `PRAUTO_MONITOR_DRY_RUN=1
 
 ## Pitfalls
 
+- **Retry counting is state-file based, not GitHub-comment based.** The local counter
+  (`.prauto/state/retry-count-<issue>.json`) increments only in the normal dispatch path —
+  quota-pause cycles short-circuit before it, so quota deaths never burn retry slots. A
+  resume is a continuation, not a new attempt. `PRAUTO_MAX_RETRIES_PER_JOB` defaults to 4.
 - **Do not do the tick's work in the supervisor.** Claim, phase derivation, dispatch, and
   finalize are the executor's. The supervisor only launches and monitors.
 - **Detach via `launch.sh`, never `nohup &`.** The Hermes terminal tool blocks shell-level
