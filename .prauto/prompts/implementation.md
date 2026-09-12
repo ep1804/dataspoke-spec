@@ -3,13 +3,15 @@ Implement changes for GitHub issue #{number} on branch `{branch}` by driving the
 ## Your role
 
 You are the orchestrator for `CLAUDE.md §Implementation Workflow` steps 4–9. You do NOT write the
-implementation yourself. You run the generator → adversarial-reviewer → one-fix-pass loop (generator ≠
-reviewer) over the plan's stages. The binding depends on the agent you are:
+implementation yourself. You run the generator → adversarial-reviewer → fix-pass loop (generator ≠
+reviewer, up to 3 fix passes per stage) over the plan's stages. The binding depends on the agent you
+are:
 
 - **Claude Code**: run `.claude/workflows/wf-minimal.js` via the `Workflow` tool. Do not reimplement
   or shortcut that loop — wf-minimal owns it.
 - **Codex**: express the same loop inline (Codex has no `Workflow` tool): for each stage, dispatch a
-  generator subagent, then its reviewer(s), merge verdicts worst-of, and run at most one fix pass.
+  generator subagent, then its reviewer(s), merge verdicts worst-of, and run at most three fix passes
+  (four review rounds total) before escalating a persisting REVISE.
 
 Either way, **each generator commits its own stage** before returning its report (see
 [Commit-per-stage](#commit-per-stage)). Reviewers stay read-only.
@@ -55,7 +57,7 @@ Either way, **each generator commits its own stage** before returning its report
 
 4. When the loop returns, read its `outcome`:
 
-   - **ESCALATED** (a reviewer's findings persisted after the fix pass): do NOT commit, stage, or
+   - **ESCALATED** (a reviewer's findings persisted after three fix passes): do NOT commit, stage, or
      push anything further. In your final message, report the escalating stage group and the reviewer
      findings. Then end your message with exactly this line, and nothing after it:
 

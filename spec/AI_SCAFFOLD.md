@@ -175,7 +175,7 @@ invocation and injects it as data; evaluators do not execute shell commands or p
 
 `AGENTS.md §Implementation Workflow` is the authoritative, CLI-agnostic reference for the
 plan → approve → generate → evaluate steps. The native parent session coordinates every stage,
-with generator and evaluator in separate native contexts and one fix pass before escalation.
+with generator and evaluator in separate native contexts and up to three fix passes before escalation.
 
 Before any generator runs, the parent reads and captures the evaluator bindings, canonical reviewer
 roles, verdict schema/contracts, and relevant evaluator memory from trusted repository state,
@@ -369,6 +369,6 @@ Steps 1-2 ensure every spec follows MANIFESTO conventions.
     reviewer memory have one canonical project-owned source. Vendor
     directories contain only invocation and permission mechanics.
 
-11. **Bounded iteration** — Review loops are capped at 1 fix iteration per generator to control
-    cost and latency. Unresolved issues after one fix pass are escalated to the user rather than
+11. **Bounded iteration** — Review loops are capped at 3 fix iterations per generator to control
+    cost and latency. Unresolved issues after three fix passes are escalated to the user rather than
     looping indefinitely.

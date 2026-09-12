@@ -162,8 +162,10 @@ async function reviewPass(stage, report, pass) {
   }
 }
 
-// generate → review → [fix pass if REVISE, max 1 iteration] → re-review.
-// REVISE persisting after the fix pass becomes ESCALATE (user decision required).
+// generate → review → [fix pass if REVISE, max MAX_FIX_PASSES iterations] → re-review.
+// REVISE persisting after MAX_FIX_PASSES fix passes becomes ESCALATE (user decision required).
+const MAX_FIX_PASSES = 3
+
 async function runStage(stage) {
   let report = await agent(genPrompt(stage, null), {
     agentType: stage, phase: stage, label: `${stage}:generate`,
@@ -172,16 +174,18 @@ async function runStage(stage) {
   if (reviewersFor(stage).length === 0) return { stage, outcome: 'DONE', report }
 
   let review = await reviewPass(stage, report, 'review-1')
-  if (review.verdict === 'REVISE') {
-    log(`${stage}: REVISE — running fix pass (${review.findings.length} findings)`)
+  let fixPasses = 0
+  while (review.verdict === 'REVISE' && fixPasses < MAX_FIX_PASSES) {
+    fixPasses += 1
+    log(`${stage}: REVISE — running fix pass ${fixPasses}/${MAX_FIX_PASSES} (${review.findings.length} findings)`)
     const fixReport = await agent(genPrompt(stage, review.findings), {
-      agentType: stage, phase: stage, label: `${stage}:fix-pass`,
+      agentType: stage, phase: stage, label: `${stage}:fix-pass-${fixPasses}`,
     })
     report = fixReport ?? report
-    review = await reviewPass(stage, report, 'review-2')
-    if (review.verdict === 'REVISE') {
-      review = { ...review, verdict: 'ESCALATE', summary: `findings persist after one fix pass: ${review.summary}` }
-    }
+    review = await reviewPass(stage, report, `review-${fixPasses + 1}`)
+  }
+  if (review.verdict === 'REVISE') {
+    review = { ...review, verdict: 'ESCALATE', summary: `findings persist after ${MAX_FIX_PASSES} fix passes: ${review.summary}` }
   }
   return {
     stage,

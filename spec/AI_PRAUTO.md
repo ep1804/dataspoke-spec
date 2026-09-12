@@ -414,7 +414,7 @@ In addition to the in-workflow per-stage review, the executor runs a **final adv
 gate** over the worker's committed diff before the PR is opened: a fresh reviewer subagent — a
 separate context that has not seen the worker's session — reads the diff against
 `scaffold/roles/reviewer.md` and returns a verdict. The reviewer is a genuinely separate process,
-not the worker's session. A REVISE verdict feeds one fix pass; an ESCALATE
+not the worker's session. A REVISE verdict feeds up to three fix passes; an ESCALATE
 abandons the job as above. The gate is mandatory for `implementation`; analysis, integration-fix,
 and pr-review do not re-open it.
 

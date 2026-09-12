@@ -97,13 +97,13 @@ End-to-end steps:
    `scaffold/roles/`) the plan needs, and in what order. See `spec/AI_SCAFFOLD.md` §Plan quality
    checklist for what a good plan covers.
 3. **Human approves the plan** — do NOT proceed to code generation without explicit approval
-4. `spec` role → `spec-reviewer` role → [fix pass if REVISE, max 1 iteration]
+4. `spec` role → `spec-reviewer` role → [fix pass if REVISE, max 3 iterations]
    (only when the plan adds or changes specs; produces the spec the code stages read — skip if no spec change)
-5. `backend` role → `reviewer` role → [fix pass if REVISE, max 1 iteration]
-6. `airflow-dag` role → `reviewer` role → [fix pass if REVISE, max 1 iteration]
+5. `backend` role → `reviewer` role → [fix pass if REVISE, max 3 iterations]
+6. `airflow-dag` role → `reviewer` role → [fix pass if REVISE, max 3 iterations]
    (steps 5 and 6 may run concurrently when the DAG work does not depend on new backend API contracts)
-7. `test` role → `test-reviewer` role → [fix pass if REVISE, max 1 iteration]
-8. `frontend` role → `reviewer` role → [fix pass if REVISE, max 1 iteration]
+7. `test` role → `test-reviewer` role → [fix pass if REVISE, max 3 iterations]
+8. `frontend` role → `reviewer` role → [fix pass if REVISE, max 3 iterations]
 9. `k8s-helm` role — containerize and deploy (when ready, no review loop)
 
 At the start of an interactive implementation run, before invoking any generator, the parent must
@@ -136,7 +136,7 @@ gets invoked depends on the coding-agent CLI driving the session:
 
 The non-negotiable rule regardless of CLI: generator ≠ reviewer — every reviewed stage gets a
 separate evaluator role before later stages build on it. An ESCALATE (or a REVISE persisting
-after one fix pass) halts the run — relay the findings to the user and wait.
+after three fix passes) halts the run — relay the findings to the user and wait.
 
 In interactive developer sessions, only a native parent-coordinated generator →
 reviewer/security-reviewer sequence can produce an
