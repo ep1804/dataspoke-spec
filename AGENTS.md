@@ -138,6 +138,16 @@ The non-negotiable rule regardless of CLI: generator ≠ reviewer — every revi
 separate evaluator role before later stages build on it. An ESCALATE (or a REVISE persisting
 after three fix passes) halts the run — relay the findings to the user and wait.
 
+**Dev-cluster teardown (interactive sessions only)**: if the approved plan's stage list (step 2)
+includes `test` or `k8s-helm` — the only stages that can touch the dev-profile cluster
+(spot/api-wired/E2E tests, or a deploy) — the parent session checks cluster status once after the
+workflow completes (`helm-charts/bin/health-check.sh`), regardless of whether the outcome was
+DONE or ESCALATED, and if it reports the cluster running, tears it down itself
+(`helm-charts/bin/uninstall.sh --profile dev`) — directly, never delegated to a subagent. This does
+not apply to prauto: its own harness (`.prauto/lib/phases.sh`) owns dev-cluster lifecycle
+end-to-end, and its driven agent's Bash tool deny-lists `helm`/`kubectl` by design
+(`.prauto/lib/agent.sh`) — it must never attempt this itself.
+
 In interactive developer sessions, only a native parent-coordinated generator →
 reviewer/security-reviewer sequence can produce an
 authoritative approval. Shell utilities do not execute generators or reviewers and cannot satisfy

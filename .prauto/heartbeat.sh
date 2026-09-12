@@ -85,6 +85,11 @@ reset_ephemeral_state
 info "Ephemeral state reset."
 cd "$REPO_DIR"
 
+# Self-heal a dev cluster left running by an earlier heartbeat that crashed
+# before its EXIT trap ran, or whose uninstall.sh itself failed. Best-effort —
+# must never block this wake over a leftover from a previous one.
+recover_orphaned_dev_env || true
+
 # ---------------------------------------------------------------------------
 # Step 3: agent selection (pre-flight)
 # ---------------------------------------------------------------------------

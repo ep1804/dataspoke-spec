@@ -10,6 +10,12 @@
 DEV_ENV_PROVISIONED=false
 DEV_ENV_PROVISIONED_ENV_FILE=""
 DEV_ENV_TEARDOWN_ATTEMPTED=false
+# Durable marker for a provisioned-but-not-yet-torn-down cluster. provision_dev_env
+# writes it; teardown_provisioned_dev_env deletes it only after uninstall.sh actually
+# succeeds. A crash (SIGKILL/OOM, skipping the EXIT trap) or a failed uninstall.sh
+# leaves it behind for a later heartbeat's recover_orphaned_dev_env() to act on —
+# the in-memory globals above are lost the moment the process dies, this is not.
+DEV_ENV_STATE_FILE="${PRAUTO_DIR}/state/dev-env-provisioned.json"
 
 # checkpoint_branch <issue_number> <branch>
 # Persist committed progress before a worker worktree is removed, then expose
@@ -148,14 +154,35 @@ provision_dev_env() {
   fi
   DEV_ENV_PROVISIONED=true
   DEV_ENV_PROVISIONED_ENV_FILE="$env_file"
+  write_dev_env_state_marker "$env_file"
   info "Cluster provisioning completed."
   return 0
 }
 
+# write_dev_env_state_marker <env_file>
+# Persist proof of a provisioned-but-not-yet-torn-down cluster to disk, atomically
+# (mktemp + chmod + mv, matching record_codex_native_session in state.sh). This is
+# what survives a crash that skips the in-memory globals and the EXIT trap.
+write_dev_env_state_marker() {
+  local env_file="$1" tmp_file
+  mkdir -p "$(dirname "$DEV_ENV_STATE_FILE")" 2>/dev/null || true
+  tmp_file=$(mktemp "${DEV_ENV_STATE_FILE}.tmp.XXXXXX") || return 1
+  if ! jq -n --arg env_file "$env_file" --arg provisioned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{env_file: $env_file, provisioned_at: $provisioned_at}' > "$tmp_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+  chmod 600 "$tmp_file" 2>/dev/null || true
+  mv -f "$tmp_file" "$DEV_ENV_STATE_FILE"
+}
+
 # teardown_provisioned_dev_env
-# Remove a dev profile that this heartbeat provisioned. Full deletion includes
-# PVCs and namespaces so a temporary test cluster does not keep incurring cost.
-# This is intentionally best-effort because it runs from the EXIT trap.
+# Remove a dev profile that this heartbeat (or a recovered earlier one, via
+# recover_orphaned_dev_env) provisioned. Full deletion includes PVCs and
+# namespaces so a temporary test cluster does not keep incurring cost. This is
+# intentionally best-effort because it runs from the EXIT trap — but it only
+# clears the durable marker on an actual success, so a failure keeps the
+# evidence around for the next heartbeat to retry instead of giving up forever.
 teardown_provisioned_dev_env() {
   [[ "${DEV_ENV_PROVISIONED:-false}" == true ]] || return 0
   [[ "${DEV_ENV_TEARDOWN_ATTEMPTED:-false}" == true ]] && return 0
@@ -175,9 +202,34 @@ teardown_provisioned_dev_env() {
   if [[ "$teardown_exit" -ne 0 ]]; then
     warn "Dev cluster teardown failed (exit ${teardown_exit}):"
     warn "$teardown_output"
+    warn "Leaving the durable marker in place for a later heartbeat to retry."
     return 0
   fi
+  rm -f "$DEV_ENV_STATE_FILE"
   info "Provisioned dev cluster torn down."
+}
+
+# recover_orphaned_dev_env
+# Self-healing for a teardown a previous heartbeat never completed — the process
+# was killed before its EXIT trap ran, or uninstall.sh itself failed. Called once
+# at the start of every heartbeat, before this wake claims any new work. Loads
+# the durable marker (if any) into the same globals provision_dev_env would have
+# set, then reuses teardown_provisioned_dev_env's own retry/backoff logic rather
+# than duplicating the uninstall.sh invocation.
+recover_orphaned_dev_env() {
+  [[ -f "$DEV_ENV_STATE_FILE" ]] || return 0
+  local env_file
+  env_file=$(jq -r '.env_file // empty' "$DEV_ENV_STATE_FILE" 2>/dev/null)
+  if [[ -z "$env_file" ]]; then
+    warn "Dev-env state marker is unreadable; removing it without a teardown attempt."
+    rm -f "$DEV_ENV_STATE_FILE"
+    return 0
+  fi
+  warn "Found a dev-env state marker from an earlier heartbeat (env_file=${env_file}). Retrying its teardown now."
+  DEV_ENV_PROVISIONED=true
+  DEV_ENV_PROVISIONED_ENV_FILE="$env_file"
+  DEV_ENV_TEARDOWN_ATTEMPTED=false
+  teardown_provisioned_dev_env
 }
 
 # run_health_check <script> <env_file>
