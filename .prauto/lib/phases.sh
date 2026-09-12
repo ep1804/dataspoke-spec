@@ -624,6 +624,17 @@ run_post_pr_regression() {
     info "Full regression failed; invoking the worker fix workflow before rerunning every layer."
     run_integration_fix_session "$issue_number" "$branch" "Full post-PR regression failed in: ${POST_PR_FAILED_STAGES:-an unclassified branch-attributable stage}. Diagnose and fix the branch-attributable failure, then preserve the generator/reviewer contract."
     checkpoint_branch "$issue_number" "$branch"
+    # A PR already exists by this point, so derive_phase_from_github will always
+    # report "pr" on the next wake — a phase the quota-resume dispatch in
+    # heartbeat.sh does not know how to resume. Posting the normal resumable
+    # pause marker here would strand the issue forever (paused, unresumable).
+    # Defer instead: no marker, no burned fix attempt, plain retry next wake.
+    if [[ "$AGENT_STATUS" == "quota" ]]; then
+      warn "Issue #${issue_number}: post-PR regression fix worker died on a quota/session limit (${ACTIVE_AGENT}). Deferring without burning a fix attempt."
+      post_post_pr_regression_comment "$branch" "Post-PR regression fix paused: ${ACTIVE_AGENT} quota is exhausted. This is an infrastructure condition, not a code failure — retrying automatically on a later heartbeat." || true
+      POST_PR_REGRESSION_SUMMARY_MODE=false
+      return 1
+    fi
     push_branch "$branch"
     create_or_update_pr "$issue_number" "" "$branch"
   done
@@ -649,11 +660,14 @@ run_pre_pr_selected_verification() {
   fi
   if diff_touches src/api/ src/backend/ src/shared/ tests/integration/; then
     info "Pre-PR verification: selected spot and api-wired suites (conservative affected-layer fallback)."
-    run_integration_test_fix "$issue_number" "$branch"
+    # A non-zero return here means the fix worker died on quota mid-loop (a
+    # pause marker is already posted) — stop before PR creation so the next
+    # wake resumes the same session instead of finalizing an unverified branch.
+    run_integration_test_fix "$issue_number" "$branch" || return 1
   fi
   if diff_touches src/frontend/ src/api/ tests/e2e/; then
     info "Pre-PR verification: selected E2E suite (conservative affected-layer fallback)."
-    run_e2e_test_fix "$issue_number" "$branch"
+    run_e2e_test_fix "$issue_number" "$branch" || return 1
   fi
 }
 
@@ -718,7 +732,7 @@ run_integration_test_fix() {
     fi
   fi
 
-  local attempt
+  local attempt quota_paused=false
   for (( attempt = 1; attempt <= max_retries; attempt++ )); do
     info "Integration test fix loop: attempt ${attempt}/${max_retries}"
     gh issue comment "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
@@ -731,6 +745,15 @@ run_integration_test_fix() {
     if [[ "$attempt" -lt "$max_retries" ]]; then
       run_integration_fix_session "$issue_number" "$branch" "$INTEG_OUTPUT"
       checkpoint_branch "$issue_number" "$branch"
+      # No PR exists yet at this point in the pipeline, so the next wake still
+      # derives phase "implementation" and the quota-resume dispatch in
+      # heartbeat.sh can resume this exact session — safe to post the marker.
+      if [[ "$AGENT_STATUS" == "quota" ]]; then
+        warn "Issue #${issue_number}: integration fix worker died on a quota/session limit (${ACTIVE_AGENT}). Pausing."
+        post_quota_paused_comment "$issue_number" "$ACTIVE_AGENT" "$AGENT_SESSION_ID"
+        quota_paused=true
+        break
+      fi
     else
       info "Max integration fix retries reached. Proceeding with current state."
     fi
@@ -739,6 +762,8 @@ run_integration_test_fix() {
   curl -s -X POST "${lock_url}/release" -H "Content-Type: application/json" \
     -d "{\"owner\": \"${lock_owner}\"}" >/dev/null 2>&1 || warn "Failed to release dev-env lock."
   info "Dev-env lock released after integration test fix loop."
+  [[ "$quota_paused" == "true" ]] && return 1
+  return 0
 }
 
 # deploy_branch_api <env_file>
@@ -849,7 +874,7 @@ run_e2e_test_fix() {
   if [[ "$lock_code" != "200" ]]; then info "Could not acquire dev-env lock. Skipping E2E."; return 0; fi
   info "Dev-env lock acquired for E2E stage."
 
-  local attempt e2e_output e2e_exit=0 deployed=false
+  local attempt e2e_output e2e_exit=0 deployed=false quota_paused=false
   for (( attempt = 1; attempt <= max_retries; attempt++ )); do
     info "E2E stage: attempt ${attempt}/${max_retries}"
     gh issue comment "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
@@ -873,6 +898,15 @@ run_e2e_test_fix() {
     if [[ "$attempt" -lt "$max_retries" ]]; then
       run_e2e_fix_session "$issue_number" "$branch" "$(tail_chars "$e2e_output" 28000)"
       checkpoint_branch "$issue_number" "$branch"
+      # No PR exists yet at this point in the pipeline, so the next wake still
+      # derives phase "implementation" and the quota-resume dispatch in
+      # heartbeat.sh can resume this exact session — safe to post the marker.
+      if [[ "$AGENT_STATUS" == "quota" ]]; then
+        warn "Issue #${issue_number}: E2E fix worker died on a quota/session limit (${ACTIVE_AGENT}). Pausing."
+        post_quota_paused_comment "$issue_number" "$ACTIVE_AGENT" "$AGENT_SESSION_ID"
+        quota_paused=true
+        break
+      fi
     else
       info "Max E2E fix retries reached."
     fi
@@ -883,6 +917,8 @@ run_e2e_test_fix() {
   info "Dev-env lock released after E2E stage."
 
   [[ "$deployed" == "true" ]] && report_e2e_results "$issue_number" "$branch" "$e2e_exit" "$e2e_output"
+  [[ "$quota_paused" == "true" ]] && return 1
+  return 0
 }
 
 # implementation_escalated <impl_output>
