@@ -116,6 +116,21 @@ budget configuration applies only to Claude invocations. Codex has neither the C
 `--max-turns` nor `--max-budget-usd` interface; the executor does not translate or pass those
 flags to Codex.
 
+### Codex model contract
+
+Codex model availability is account- and client-specific. PRauto and the Codex role bindings
+therefore omit an explicit model by default and inherit the authenticated account's Codex default.
+`PRAUTO_CODEX_MODEL` is an optional fresh-session override for an operator whose client and account
+explicitly support it; it is not a portable default and role bindings must not hard-code one. A
+model override and `PRAUTO_CODEX_EFFORT` form one pair: both must be configured to override the
+account default, and an effort without a model is invalid.
+
+The executor preflights an explicit model override and `PRAUTO_CODEX_EFFORT` before dispatch. A
+rejected, malformed, or unsupported override is a configuration/account-compatibility failure: it
+posts diagnostic evidence and leaves the work item non-ready; it must not start a worker, consume
+a retry, silently substitute a model, or classify the outcome as quota exhaustion. An absent model
+override is valid and means to use the account default.
+
 ---
 
 ## Executor Cycle
@@ -296,8 +311,8 @@ At `PRAUTO_MAX_RETRIES_PER_JOB` (default 4), the issue is abandoned. The counter
 
 | Scenario | Actions |
 |----------|---------|
-| New issue -> PR | Push, create PR (with `prauto:review` label), remove `prauto:wip`, add `prauto:review` |
-| PR feedback | Address with commits, push, post marker |
+| New issue -> PR | Push and create or update the PR in `prauto:wip`; run the required post-PR regression; move the issue and PR to `prauto:review` only after it passes |
+| PR feedback | Return to `prauto:wip`, address with commits, push, run the required post-PR regression, then restore `prauto:review` only on a pass |
 | Workflow ESCALATE | Do **not** finalize a PR; remove `prauto:wip`/`prauto:plan-review`, add `prauto:failed`, post abandonment comment naming the escalating stage and its findings |
 | Max retries | Remove `prauto:wip`/`prauto:plan-review`, add `prauto:failed`, post abandonment comment |
 
@@ -348,14 +363,17 @@ shared command-line flags or output formats.
 - **Claude Code** receives its native session id, prompt/system-prompt, tool-scoping, turn-cap,
   and optional budget-cap arguments. Its structured result is parsed using Claude's JSON output
   contract.
-- **Codex fresh sessions** run with `codex exec --json` and the workspace-write sandbox. Codex
-  stdout is JSONL: the executor reads the `thread.started` event to persist its `thread_id`, then
-  reads terminal events for the worker result and quota classification. It must not fabricate a
-  Codex id or pass an executor-generated id as though Codex had accepted it.
+- **Codex fresh sessions** run with `codex exec --json` and the workspace-write sandbox. When the
+  operator configured a compatible model-and-effort override pair, the executor passes it;
+  otherwise Codex inherits the authenticated account's defaults. Codex stdout is JSONL: the
+  executor reads the `thread.started` event to persist its `thread_id`, then reads terminal events
+  for the worker result and quota classification. It must not fabricate a Codex id or pass an
+  executor-generated id as though Codex had accepted it.
 - **Codex resumed sessions** run with `codex exec resume --json <thread-id> <prompt>`. Resume
-  accepts the prior Codex identity; it does not accept Claude session, tool, turn, budget, or
-  fresh-session sandbox flags. The executor uses the JSONL stream on a resumed run for result and
-  quota classification as well.
+  accepts the prior Codex identity and relies on that native thread's established model and
+  reasoning settings. It does not reinject model/effort or accept Claude session, tool, turn,
+  budget, or fresh-session sandbox flags. The executor uses the JSONL stream on a resumed run for
+  result and quota classification as well.
 
 JSONL is a protocol boundary, not display text: parsers select records by their event type and
 fields, preserve the raw stream as diagnostic evidence, and do not infer a thread id or quota
@@ -444,10 +462,12 @@ from it would let a branch redirect prauto's deploys and resets at a cluster of 
 The cluster is prauto's to create, not a precondition it waits on. When
 `./helm-charts/bin/health-check.sh --env-file $PRAUTO_DEV_ENV_FILE --keep-lock` exits 1 — probes ran and the
 deployment is unhealthy or absent — prauto runs a full
-`install.sh --profile dev --env-file $PRAUTO_DEV_ENV_FILE` and re-checks; the cluster stages are
-skipped only if **provisioning itself** fails. Exit 2 is a local setup fault, not cluster evidence
-(`HELM_CHART.md` §Health Check): prauto reports it and provisions nothing, so a missing `kubectl`
-or an unresolvable context cannot trigger an unsupervised cluster build. Gated by
+`install.sh --profile dev --env-file $PRAUTO_DEV_ENV_FILE` and re-checks. A provisioning failure
+blocks any required cluster regression, leaves the PR in `prauto:wip`, and is retried on a later
+heartbeat; it never becomes a passing skip. Exit 2 is a local setup fault, not cluster evidence
+(`HELM_CHART.md` §Health Check): prauto reports it, provisions nothing, and leaves required
+cluster regression blocked for a later retry, so a missing `kubectl` or an unresolvable context
+cannot trigger an unsupervised cluster build. Gated by
 `PRAUTO_CLUSTER_PROVISION_ENABLED` (default `true`). The health check is run under a wall-clock
 backstop and in a private `TMPDIR`, because this worker is unsupervised: nothing outside it would
 notice a check that never returns, and a run the backstop stops must not leave behind the
@@ -456,7 +476,9 @@ kubeconfig copy the check writes. A fired backstop counts as exit 1. Every
 carries `--env-file $PRAUTO_DEV_ENV_FILE`; without it both default to `helm-charts/.env.dev`, the
 shared cluster the per-worker binding exists to avoid. The health check additionally carries
 `--keep-lock` and runs with stdin closed: an unattended gate must never wait on a release prompt,
-and prauto meets a held lock through its own acquire, which skips on 409.
+and prauto meets a held lock through its own acquire. A lock conflict for required cluster tests
+is infrastructure-blocked: the issue and PR remain `prauto:wip`, `prauto:review` is not applied,
+and the same regression retries on a later heartbeat.
 
 Provisioning cost does not count against `PRAUTO_MAX_RETRIES_PER_JOB` — standing up a cluster is
 not an attempt at the issue, and charging it would abandon jobs for infrastructure latency that
@@ -507,67 +529,87 @@ run would only re-prove it at far higher cost.
 ### Push and PR creation
 
 After implementation, the executor (not the worker) pushes the branch, links it to the issue's
-Development section, posts commit-link comments for any unpublished commits, checks for an
-existing PR, and creates one if none exists (with `prauto:review` label, assignee, optional
-reviewer). The same checkpoint publication runs after worker-led review and integration-fix
-stages. A strict push remains the finalization gate; checkpoint pushes are best-effort so a
-temporary GitHub outage does not erase local committed progress.
+Development section, posts commit-link comments for any unpublished commits, and creates or
+updates its PR. Creation keeps the issue and PR in `prauto:wip`; `prauto:review` is applied only
+after the required post-PR regression passes. The same checkpoint publication runs after
+worker-led review and test-fix stages. A strict push remains the finalization gate; checkpoint
+pushes are best-effort so a temporary GitHub outage does not erase local committed progress.
 
 ### PR review handling
 
 Issues with `prauto:review` label are checked for unaddressed non-prauto comments. The
 feedback-addressed marker breaks the re-pickup loop; new reviewer comments after the marker
-make the PR actionable again.
+make the PR actionable again. A feedback fix returns the PR to `prauto:wip` and must pass the
+same full post-PR regression against its pushed head before `prauto:review` is restored.
 
 ### Test execution
 
 Prauto runs the unattended form of the protocol in [`TESTING.md`](TESTING.md), which is
-authoritative for layers, commands, and constraints. Stages run in order; each is skipped when
-the diff does not reach its layer. Each stage names its **actor**: the worker runs a stage from
-its prompt template inside the session's tool whitelist, while the executor runs a stage
-directly and invokes the worker only for fix sessions.
+authoritative for layers, commands, and constraints. The executor classifies the final branch
+diff and records the selected targets and classification in its test evidence. This deterministic
+policy is tool-neutral: it applies identically whether the worker is Claude Code or Codex. Each
+stage names its **actor**: the worker runs a stage from its prompt template inside the session's
+tool whitelist, while the executor runs a stage directly and invokes the worker only for fix
+sessions.
+
+### Test-impact classification
+
+The executor distinguishes code-affecting changes from documentation and scaffold-only changes.
+Code-affecting changes include application, test, build, deployment, runtime-configuration, and
+dependency changes. Documentation, AI-scaffold, plugin, and other non-runtime operational changes
+are excluded only when the complete diff is confined to the executor's explicit exclusion set.
+An unrecognised path, a mixed diff, or an unavailable classification is code-affecting. Test-only
+changes are code-affecting. The classifier is centralized in the harness; a worker must not
+declare its own change exempt.
+
+### Pre-PR selected verification
+
+Before a PR exists, Prauto runs the static gates and the unit tests required by the changed paths
+and their declared test impact. Where a code-affecting change requires cluster verification, it
+may similarly run only the related spot, api-wired, and E2E targets. The executor records why each
+target was selected. If it cannot determine a complete safe selection for a required layer, it
+runs that layer's full suite; uncertainty never becomes an omitted test.
 
 **Pre-flight gate** *(executor)*: the health check in its
 [Provisioning](#provisioning) form — `--env-file $PRAUTO_DEV_ENV_FILE --keep-lock` — runs before
-any integration work. On exit 1, prauto provisions its own cluster and re-checks
-([Provisioning](#provisioning)); the integration and E2E stages are **skipped, not failed** only
-if provisioning fails. On exit 2 it reports the setup fault, provisions nothing, and skips those
-stages rather than failing the issue. An unprovisionable cluster is evidence about the
-infrastructure, not the branch, so failing it would burn retries against unrelated code.
+any required cluster work. On exit 1, prauto provisions its own cluster and re-checks
+([Provisioning](#provisioning)). A provisioning, health-check, or lock failure is a blocked
+result: it is reported and prevents `prauto:review`; it is never converted to a passing skip.
+Exit 2 remains a setup fault that provisions nothing, but is also blocked whenever the required
+regression needs the cluster.
 
 **Environment**: the executor's integration and E2E stages source the worker's env file
 (`$PRAUTO_DEV_ENV_FILE`, resolved under `$REPO_DIR`) via `set -a` (the file carries no `export`
 prefixes) and hold the dev-env lock at `$DATASPOKE_DEV_LOCK_URL`.
 
-**Stage 1 -- Static gates** *(worker)*: `uv run ruff check src/ tests/` and `uv run mypy src/`,
+**Stage 1 -- Static gates** *(worker before PR; executor after PR)*: `uv run ruff check src/ tests/` and `uv run mypy src/`,
 invoked as **checks, never `--fix`** — prauto verifies the author-run gate rather than mutating
 the diff until it passes. Frontend-touching work adds `npx tsc --noEmit` and `npx eslint src/`
 from `src/frontend/`; diffs touching `tests/e2e/` add `pnpm -C tests/e2e typecheck`. These are
 the four author-run gates of [`TESTING.md §CI Behavior`](TESTING.md#ci-behavior); no
 `.github/workflows/` exists, so they are the only thing standing between prauto and a red `dev`.
 
-**Stage 2 -- Unit** *(worker)*: `uv run pytest tests/unit/`; frontend-touching work also runs
+**Stage 2 -- Unit** *(worker before PR; executor after PR)*: `uv run pytest tests/unit/`; frontend-touching work also runs
 `pnpm -C src/frontend test` (offline, mocked). Needs no cluster and no lock.
 
-**Stage 3 -- Integration fix loop (pre-push)** *(executor; worker for fixes)*: after
+**Stage 3 -- Integration fix loop (pre-PR)** *(executor; worker for fixes)*: after
 implementation, under the dev-env lock. A diff touching `src/{api,backend,shared}` deploys the
 branch's API first ([Branch image deploys](#branch-image-deploys)) so the tests reach the
-branch's code rather than a stale image. Then spot (`tests/integration/spot/`) and api-wired
-(`tests/integration/api_wired/`) run as **two separate groups**, never mixed — a mixed run puts
-competing Airflow load on the cluster and flakes on timing. The split binds every integration
-invocation, Stage 5 included. Failures feed the worker's fix loop up to
+branch's code rather than a stale image. It runs the selected spot (`tests/integration/spot/`) and
+api-wired (`tests/integration/api_wired/`) targets as **two separate groups**, never mixed — a
+mixed run puts competing Airflow load on the cluster and flakes on timing. The split binds every
+integration invocation, Stage 5 included. Failures feed the worker's fix loop up to
 `PRAUTO_INTEGRATION_FIX_MAX_RETRIES`.
 
-**Stage 4 -- E2E (Playwright)** *(executor; worker for fixes)*: runs when the diff touches
-`src/frontend/`, `tests/e2e/`, or `src/api/` ([Branch image deploys](#branch-image-deploys)), and
-acquires the dev-env lock for its own run, strictly after the integration groups release theirs. It
-deploys the branch's frontend, then runs `pnpm -C tests/e2e test`.
+**Stage 4 -- E2E (Playwright, pre-PR)** *(executor; worker for fixes)*: runs when the selector
+identifies an affected E2E target, including the `src/frontend/`, `tests/e2e/`, or `src/api/`
+surface ([Branch image deploys](#branch-image-deploys)). It acquires the dev-env lock for its own
+run, strictly after the integration groups release theirs, deploys the branch's frontend, and runs
+the selected Playwright target.
 
 - This stage gives prauto a **cluster + browser dependency** no other stage has.
-- The hold is separate rather than inherited because the integration loop has another caller —
-  the PR-review path — where E2E is not wanted. The cost is bounded: if another owner takes the
-  lock in the gap, E2E skips cleanly, and E2E's own setup reset-seeds rather than depending on
-  state inherited from the integration groups.
+- The hold is separate rather than inherited because the integration loop has another caller.
+  E2E's own setup reset-seeds rather than depending on state inherited from the integration groups.
 - Ordering is a constraint, not a preference. Two reasons compound: the frontend deploy rolls the
   API pod, and `--components api` would delete the cluster frontend if it ran second. E2E must
   land strictly after the integration groups and never run concurrently with them.
@@ -575,8 +617,30 @@ deploys the branch's frontend, then runs `pnpm -C tests/e2e test`.
   session only on a non-final attempt, so a single attempt runs the suite and reports the result
   without fixing. Raising it buys fix attempts at a full rebuild + redeploy each.
 
-**Stage 5 -- Final test report (post-push)** *(executor)*: runs unit + integration tests —
-integration under Stage 3's two-group split — and posts results as collapsible PR comments.
+**Stage 5 -- Full regression and readiness gate (post-PR)** *(executor; worker for fixes)*: every
+code-affecting PR runs the complete static-gate and unit-test command families, followed by the
+full spot suite, full api-wired suite, and full E2E suite. Spot and api-wired remain separate
+groups; E2E remains strictly after both. The executor deploys the branch artifacts needed to
+exercise all three cluster-dependent suites, regardless of whether a narrower pre-PR selection
+ran.
+
+The regression is against the exact pushed PR head. The executor posts no per-stage output or
+collapsible result comment. Instead, a passing exact-head run posts one brief PR success comment.
+A branch-attributable static, unit, spot, api-wired, E2E, or branch-deploy failure keeps the PR out
+of `prauto:review`; before starting the applicable generator/reviewer fix workflow, the executor
+posts one brief PR failure comment naming the failed stage and stating that the agents will fix it
+and rerun full regression. A fix is committed and pushed before the entire required full regression
+reruns; each resulting exact-head pass posts the brief success comment again. A provisioning,
+health-check, lock, or local setup failure is infrastructure-blocked: the executor posts a distinct
+brief blocked comment, leaves the issue and PR in `prauto:wip`, and retries the same regression on
+a later heartbeat without promising a code fix or asking a worker to change code. Only a passing
+run against the final PR head permits the executor to apply `prauto:review`. Excluded, non-code
+PRs may bypass this full regression but still retain any selected pre-PR verification required by
+their changed paths.
+
+The cluster provisioned by a heartbeat remains available through PR creation, post-PR regression,
+and any regression-fix reruns. The heartbeat tears down only the cluster it provisioned, once at
+its exit; it never tears down and recreates that cluster between the pre-PR and post-PR phases.
 
 ### What a green run proves
 

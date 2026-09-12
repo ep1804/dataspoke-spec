@@ -181,11 +181,12 @@ def test_codex_anchor_requires_exact_current_lifecycle_and_strict_uuid(tmp_path:
     }
 
 
-def test_codex_adapter_uses_only_native_fresh_and_resume_arguments(tmp_path: Path) -> None:
+def test_codex_adapter_uses_default_fresh_and_native_resume_arguments(tmp_path: Path) -> None:
     """Fresh and resume invocations remain distinct Codex-native CLI adapters.
 
-    spec: spec/AI_PRAUTO.md §Agent execution adapters (fresh workspace-write;
-    resume only JSON/id/prompt) and §Quota-pause and resume (trusted resume).
+    spec: spec/AI_PRAUTO.md §Agent execution adapters (fresh workspace-write
+    with account-default model; resume only JSON/id/prompt) and §Quota-pause
+    and resume (trusted resume).
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -214,13 +215,13 @@ def test_codex_adapter_uses_only_native_fresh_and_resume_arguments(tmp_path: Pat
             "CUR_ISSUE_NUMBER=192",
             f"READY_LABEL_TIMESTAMP={READY_TIMESTAMP}",
             "ACTIVE_AGENT=codex",
-            'invoke_agent "fresh prompt" "Claude-only tools" 99 1.23',
+            'invoke_agent "-fresh positional prompt" "Claude-only tools" 99 1.23',
             'cp "$CODEX_ARGS_FILE" "$CODEX_ARGS_FILE.fresh"',
             f"PAUSED_SESSION_ID={THREAD_ID}",
             "PAUSED_AGENT=codex",
             "PAUSED_MARKER_AUTHOR=worker",
             "PRAUTO_GITHUB_ACTOR=worker",
-            'resume_agent "resume prompt" "Claude-only tools" 99 "$PAUSED_SESSION_ID" 1.23',
+            'resume_agent "-resume positional prompt" "Claude-only tools" 99 "$PAUSED_SESSION_ID" 1.23',
         ]
     )
     result = _run_bash(
@@ -238,17 +239,168 @@ def test_codex_adapter_uses_only_native_fresh_and_resume_arguments(tmp_path: Pat
         "--json",
         "--sandbox",
         "workspace-write",
-        "fresh prompt",
+        "--",
+        "-fresh positional prompt",
     ]
     assert args_file.read_text().splitlines() == [
         "exec",
         "resume",
         "--json",
+        "--",
         THREAD_ID,
-        "resume prompt",
+        "-resume positional prompt",
     ]
     assert "--max-turns" not in args_file.read_text()
     assert "--max-budget-usd" not in args_file.read_text()
+    assert "-m" not in Path(f"{args_file}.fresh").read_text()
+    assert "-c" not in Path(f"{args_file}.fresh").read_text()
+
+
+def test_codex_committed_config_uses_account_default_without_model_flags(tmp_path: Path) -> None:
+    """The committed config must not silently turn on a Codex override.
+
+    This sources the actual shared PRauto config rather than relying only on
+    an unset test environment, so a future default assignment cannot re-add
+    ``-m`` or ``-c`` to ChatGPT-authenticated Codex invocations unnoticed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fixture = tmp_path / "codex.jsonl"
+    args_file = tmp_path / "codex-args.json"
+    _write_jsonl(fixture, [{"type": "thread.started", "thread_id": THREAD_ID}])
+    codex_stub = bin_dir / "codex"
+    codex_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n"
+        "cat \"$CODEX_FIXTURE\"\n"
+    )
+    codex_stub.chmod(0o755)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    result = _run_bash(
+        "\n".join(
+            [
+                "unset PRAUTO_CODEX_MODEL PRAUTO_CODEX_EFFORT",
+                f"source {shlex.quote(str(PRAUTO / 'config.env'))}",
+                _source_libraries(tmp_path),
+                f"CUR_SESSION_DIR={shlex.quote(str(session_dir))}",
+                "CUR_ISSUE_NUMBER=192",
+                f"READY_LABEL_TIMESTAMP={READY_TIMESTAMP}",
+                "ACTIVE_AGENT=codex",
+                'invoke_agent "config default prompt" "" 1',
+            ]
+        ),
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "CODEX_ARGS_FILE": str(args_file),
+            "CODEX_FIXTURE": str(fixture),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert args_file.read_text().splitlines() == [
+        "exec", "--json", "--sandbox", "workspace-write", "--", "config default prompt"
+    ]
+
+
+def test_codex_adapter_passes_valid_explicit_model_and_effort_together(tmp_path: Path) -> None:
+    """An opt-in override passes its validated formal model and effort exactly."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fixture = tmp_path / "codex.jsonl"
+    args_file = tmp_path / "codex-args.json"
+    _write_jsonl(fixture, [{"type": "thread.started", "thread_id": THREAD_ID}])
+    codex_stub = bin_dir / "codex"
+    codex_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n"
+        "cat \"$CODEX_FIXTURE\"\n"
+    )
+    codex_stub.chmod(0o755)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    result = _run_bash(
+        "\n".join(
+            [
+                _source_libraries(tmp_path),
+                f"CUR_SESSION_DIR={shlex.quote(str(session_dir))}",
+                "CUR_ISSUE_NUMBER=192",
+                f"READY_LABEL_TIMESTAMP={READY_TIMESTAMP}",
+                "ACTIVE_AGENT=codex",
+                'PRAUTO_CODEX_MODEL="gpt-5.6-terra"',
+                'PRAUTO_CODEX_EFFORT="xhigh"',
+                'invoke_agent "override prompt" "" 1',
+            ]
+        ),
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "CODEX_ARGS_FILE": str(args_file),
+            "CODEX_FIXTURE": str(fixture),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert args_file.read_text().splitlines() == [
+        "exec", "--json", "--sandbox", "workspace-write",
+        "-m", "gpt-5.6-terra", "-c", "model_reasoning_effort=xhigh",
+        "--", "override prompt",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("configured_model", "configured_effort", "case"),
+    [
+        ("terra", "medium", "bare-alias"),
+        ("not-a-codex-model", "medium", "unknown-model"),
+        ("gpt-5.6", "unsupported", "invalid-effort"),
+        ("", "medium", "effort-only"),
+    ],
+)
+def test_codex_invalid_override_fails_before_invoking_cli(
+    tmp_path: Path, configured_model: str, configured_effort: str, case: str
+) -> None:
+    """Invalid or partial Codex overrides are fail-closed harness errors.
+
+    spec: spec/AI_PRAUTO.md §Agent execution adapters (paired, validated
+    Codex model/reasoning-effort override).  No external CLI invocation is
+    allowed for an invalid model, invalid effort, or effort-only setting.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    invocation_marker = tmp_path / "codex-invoked"
+    codex_stub = bin_dir / "codex"
+    codex_stub.write_text(
+        '#!/usr/bin/env bash\n'
+        'touch "$CODEX_INVOCATION_MARKER"\n'
+        'exit 99\n'
+    )
+    codex_stub.chmod(0o755)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    result = _run_bash(
+        "\n".join(
+            [
+                _source_libraries(tmp_path),
+                f"CUR_SESSION_DIR={shlex.quote(str(session_dir))}",
+                "CUR_ISSUE_NUMBER=192",
+                f"READY_LABEL_TIMESTAMP={READY_TIMESTAMP}",
+                "ACTIVE_AGENT=codex",
+                f"PRAUTO_CODEX_MODEL={shlex.quote(configured_model)}",
+                f"PRAUTO_CODEX_EFFORT={shlex.quote(configured_effort)}",
+                'invoke_agent "invalid model prompt" "" 1',
+                'jq -cn --arg session "$AGENT_SESSION_ID" --arg status "$AGENT_STATUS" '
+                "'{session: $session, status: $status}'",
+            ]
+        ),
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "CODEX_INVOCATION_MARKER": str(invocation_marker),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not invocation_marker.exists(), case
+    assert json.loads(result.stdout.splitlines()[-1]) == {"session": "", "status": "error"}
 
 
 @pytest.mark.parametrize(
@@ -327,6 +479,8 @@ def test_codex_quota_exit_without_thread_started_is_nonresumable(tmp_path: Path)
                 "CUR_ISSUE_NUMBER=192",
                 f"READY_LABEL_TIMESTAMP={READY_TIMESTAMP}",
                 "ACTIVE_AGENT=codex",
+                'PRAUTO_CODEX_MODEL="gpt-5.6"',
+                'PRAUTO_CODEX_EFFORT="medium"',
                 'invoke_agent "quota prompt" "" 1',
                 'jq -cn --arg session "$AGENT_SESSION_ID" --arg status "$AGENT_STATUS" '
                 "'{session: $session, status: $status}'",

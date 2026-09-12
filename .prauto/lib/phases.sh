@@ -31,52 +31,93 @@ checkpoint_branch() {
   publish_commit_checkpoints "$issue_number" "$branch" || true
 }
 
+# branch_is_code_affecting <branch>
+# The exemption list is deliberately narrow.  A path not listed here, an empty
+# diff, or a git failure is code-affecting: workers never get to self-exempt.
+branch_is_code_affecting() {
+  local branch="$1" paths path
+  paths=$(git diff --name-only "origin/${PRAUTO_BASE_BRANCH}...${branch}" 2>/dev/null) || return 0
+  [[ -n "$paths" ]] || return 0
+  while IFS= read -r path; do
+    case "$path" in
+      *.md|docs/*|spec/*|scaffold/*|.agents/skills/*|.claude/agents/*|.codex/agents/*|.prauto/prompts/*|.prauto/README.md|.prauto/config*.env.example|plugins/*)
+        ;;
+      *) return 0 ;;
+    esac
+  done <<< "$paths"
+  return 1
+}
+
+regression_set_wip() {
+  local issue_number="$1" branch="${2:-}"
+  if ! gh issue edit "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
+    --remove-label "$PRAUTO_GITHUB_LABEL_REVIEW" \
+    --add-label "$PRAUTO_GITHUB_LABEL_WIP" 2>/dev/null; then
+    warn "Could not establish prauto:wip on issue #${issue_number}."
+    return 1
+  fi
+  if [[ -n "$branch" ]] && ! set_pr_wip_label "$branch"; then
+    warn "Could not establish prauto:wip on the PR for ${branch}."
+    return 1
+  fi
+  return 0
+}
+
+regression_blocked() {
+  local issue_number="$1" reason="$2" branch="${3:-}"
+  regression_set_wip "$issue_number" "$branch" || return 1
+  gh issue comment "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
+    --body "prauto(${PRAUTO_WORKER_ID}): Regression blocked by infrastructure/setup: ${reason}. The PR remains in prauto:wip and will retry on a later heartbeat." \
+    2>/dev/null || true
+}
+
+regression_ready() {
+  local issue_number="$1" branch="${2:-}"
+  # Move the PR first; if the issue transition then fails, restore the PR to
+  # WIP. Completion is never allowed with only one side marked ready.
+  if [[ -n "$branch" ]] && ! set_pr_review_label "$branch"; then
+    warn "Could not establish prauto:review on the PR for ${branch}."
+    return 1
+  fi
+  if ! gh issue edit "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
+    --remove-label "$PRAUTO_GITHUB_LABEL_WIP" \
+    --remove-label "${PRAUTO_GITHUB_LABEL_PLAN_REVIEW}" \
+    --add-label "$PRAUTO_GITHUB_LABEL_REVIEW" 2>/dev/null; then
+    warn "Could not establish prauto:review on issue #${issue_number}."
+    [[ -n "$branch" ]] && set_pr_wip_label "$branch" || true
+    return 1
+  fi
+  return 0
+}
+
 # finalize_issue_pr <branch> <issue_number> <issue_title>
-# Push, create/update PR, run+post tests, swap labels to prauto:review, complete.
-# The worker never pushes — this is the harness-owned finalize step.
+# The PR is intentionally created before the full regression.  It remains WIP
+# until the exact pushed head passes the centralized readiness gate.
 finalize_issue_pr() {
   local branch="$1" issue_number="$2" issue_title="$3"
   push_branch "$branch"
   link_branch_to_issue "$issue_number" "$branch" || true
   publish_commit_checkpoints "$issue_number" "$branch" || true
   create_or_update_pr "$issue_number" "$issue_title" "$branch"
-  run_and_post_test_results "$branch"
-  gh issue edit "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
-    --remove-label "$PRAUTO_GITHUB_LABEL_WIP" \
-    --remove-label "${PRAUTO_GITHUB_LABEL_PLAN_REVIEW}" \
-    --add-label "$PRAUTO_GITHUB_LABEL_REVIEW" 2>/dev/null || true
-  complete_job "$issue_number"
-}
-
-# run_and_post_test_results <branch>
-run_and_post_test_results() {
-  local branch="$1"
-  get_pr_number_for_branch "$branch"
-  if [[ -z "$BRANCH_PR_NUMBER" ]]; then
-    warn "No PR found for branch ${branch}. Skipping test result posting."
+  if ! regression_set_wip "$issue_number" "$branch"; then
+    gh issue comment "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
+      --body "prauto(${PRAUTO_WORKER_ID}): Regression blocked: GitHub label/API state could not be established. Retrying on a later heartbeat." 2>/dev/null || true
     return 0
   fi
-
-  if [[ -f "pyproject.toml" ]]; then
-    info "Setting up .venv (uv sync)..."
-    uv sync 2>&1 || warn "uv sync failed — tests may not run correctly."
+  if run_post_pr_regression "$issue_number" "$branch"; then
+    if regression_ready "$issue_number" "$branch"; then
+      complete_job "$issue_number"
+    else
+      gh issue comment "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
+        --body "prauto(${PRAUTO_WORKER_ID}): Regression passed but GitHub readiness labels could not be updated; retrying on a later heartbeat." 2>/dev/null || true
+    fi
   fi
+}
 
-  if [[ -d "tests/unit" ]]; then
-    info "Running unit tests..."
-    local unit_output unit_exit=0
-    unit_output=$(uv run pytest tests/unit/ --tb=short 2>&1) || unit_exit=$?
-    post_test_results_comment "$BRANCH_PR_NUMBER" "Unit" "$unit_exit" "$unit_output"
-    info "Unit test results posted on PR #${BRANCH_PR_NUMBER} (exit: ${unit_exit})."
-  else
-    info "No tests/unit/ directory. Skipping unit tests."
-  fi
-
-  if [[ -d "tests/integration" ]]; then
-    run_integration_tests_with_protocol "$BRANCH_PR_NUMBER"
-  else
-    info "No tests/integration/ directory. Skipping integration tests."
-  fi
+# Backwards-compatible entry point for callers that need the post-PR gate.
+run_and_post_test_results() {
+  local branch="$1"
+  run_post_pr_regression "${CURRENT_ISSUE_NUMBER:-}" "$branch"
 }
 
 # env_file_value <file> <key>
@@ -394,6 +435,234 @@ run_integration_tests_with_protocol() {
   info "Integration test results posted on PR #${pr_number}."
 }
 
+# post_result <branch> <stage> <exit> <output>
+post_result() {
+  local branch="$1" stage="$2" exit_code="$3" output="$4"
+  # Full post-PR regression deliberately emits one concise status comment per
+  # pushed head.  Keep the per-stage output available to the local worker
+  # process, but do not expose it in a series of public PR comments.
+  if [[ "${POST_PR_REGRESSION_SUMMARY_MODE:-false}" == true ]]; then
+    if [[ "$exit_code" -ne 0 ]]; then
+      case "|${POST_PR_FAILED_STAGES:-}|" in
+        *"|${stage}|"*) ;;
+        *) POST_PR_FAILED_STAGES="${POST_PR_FAILED_STAGES:+${POST_PR_FAILED_STAGES}, }${stage}" ;;
+      esac
+    fi
+    return 0
+  fi
+  get_pr_number_for_branch "$branch"
+  [[ -n "$BRANCH_PR_NUMBER" ]] && post_test_results_comment "$BRANCH_PR_NUMBER" "$stage" "$exit_code" "$output"
+}
+
+# post_post_pr_regression_comment <branch> <body>
+# Regression status belongs to the PR conversation, not its linked issue.
+# The body is deliberately caller-supplied summary text; never include command
+# output here, because test output can contain credentials or excessive detail.
+post_post_pr_regression_comment() {
+  local branch="$1" body="$2"
+  get_pr_number_for_branch "$branch"
+  if [[ -z "${BRANCH_PR_NUMBER:-}" ]]; then
+    warn "No PR found for branch ${branch}; could not post regression status."
+    return 1
+  fi
+  if ! gh pr comment "$BRANCH_PR_NUMBER" -R "$PRAUTO_GITHUB_REPO" \
+      --body "prauto(${PRAUTO_WORKER_ID}): ${body}" 2>/dev/null; then
+    warn "Failed to post regression status on PR #${BRANCH_PR_NUMBER}."
+    return 1
+  fi
+  return 0
+}
+
+# run_static_and_unit_regression <branch>
+# Sets LOCAL_REGRESSION_EXIT.  Commands are checks only; none mutates the diff.
+run_static_and_unit_regression() {
+  local branch="$1" rc=0 output exit_code=0
+  LOCAL_REGRESSION_EXIT=0
+  [[ -f pyproject.toml ]] || { LOCAL_REGRESSION_EXIT=2; LOCAL_REGRESSION_REASON="pyproject.toml is missing"; return 0; }
+  output=$(uv sync 2>&1) || { LOCAL_REGRESSION_EXIT=2; LOCAL_REGRESSION_REASON="uv sync failed"; return 0; }
+
+  output=$(uv run ruff check src/ tests/ 2>&1) || exit_code=$?
+  post_result "$branch" "Static (ruff)" "$exit_code" "$output"
+  [[ "$exit_code" -eq 0 ]] || rc=1
+  exit_code=0; output=$(uv run mypy src/ 2>&1) || exit_code=$?
+  post_result "$branch" "Static (mypy)" "$exit_code" "$output"
+  [[ "$exit_code" -eq 0 ]] || rc=1
+
+  if diff_touches src/frontend/; then
+    exit_code=0; output=$(pnpm -C src/frontend exec tsc --noEmit 2>&1) || exit_code=$?
+    post_result "$branch" "Static (frontend typecheck)" "$exit_code" "$output"; [[ "$exit_code" -eq 0 ]] || rc=1
+    exit_code=0; output=$(pnpm -C src/frontend exec eslint src/ 2>&1) || exit_code=$?
+    post_result "$branch" "Static (frontend eslint)" "$exit_code" "$output"; [[ "$exit_code" -eq 0 ]] || rc=1
+  fi
+  if diff_touches tests/e2e/; then
+    exit_code=0; output=$(pnpm -C tests/e2e typecheck 2>&1) || exit_code=$?
+    post_result "$branch" "Static (E2E typecheck)" "$exit_code" "$output"; [[ "$exit_code" -eq 0 ]] || rc=1
+  fi
+
+  [[ -d tests/unit ]] || { LOCAL_REGRESSION_EXIT=2; LOCAL_REGRESSION_REASON="tests/unit is missing"; return 0; }
+  exit_code=0; output=$(uv run pytest tests/unit/ --tb=short 2>&1) || exit_code=$?
+  post_result "$branch" "Unit (Python)" "$exit_code" "$output"; [[ "$exit_code" -eq 0 ]] || rc=1
+  if diff_touches src/frontend/; then
+    exit_code=0; output=$(pnpm -C src/frontend test 2>&1) || exit_code=$?
+    post_result "$branch" "Unit (frontend)" "$exit_code" "$output"; [[ "$exit_code" -eq 0 ]] || rc=1
+  fi
+  LOCAL_REGRESSION_EXIT="$rc"
+}
+
+# acquire_required_dev_lock <issue> <purpose>
+# Sets REQUIRED_LOCK_OWNER.  Unlike historical pre-PR helpers, every failure is
+# a blocked result: a required regression must never become a passing skip.
+acquire_required_dev_lock() {
+  local issue_number="$1" purpose="$2" lock_code
+  REQUIRED_LOCK_OWNER="prauto-${PRAUTO_WORKER_ID}"
+  if ! resolve_dev_env; then regression_blocked "$issue_number" "dev env file is unavailable" "${CURRENT_REGRESSION_BRANCH:-}"; return 1; fi
+  if ! dev_env_healthy "$DEV_ENV_FILE"; then regression_blocked "$issue_number" "dev cluster health/provisioning failed" "${CURRENT_REGRESSION_BRANCH:-}"; return 1; fi
+  if ! curl -s --connect-timeout 2 "${DEV_LOCK_URL}/status" >/dev/null 2>&1; then
+    regression_blocked "$issue_number" "dev-env lock endpoint is unreachable" "${CURRENT_REGRESSION_BRANCH:-}"; return 1
+  fi
+  lock_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${DEV_LOCK_URL}/acquire" \
+    -H "Content-Type: application/json" \
+    -d "{\"owner\": \"${REQUIRED_LOCK_OWNER}\", \"message\": \"prauto ${purpose} for issue #${issue_number}\"}")
+  if [[ "$lock_code" != 200 ]]; then regression_blocked "$issue_number" "dev-env lock acquisition returned HTTP ${lock_code}" "${CURRENT_REGRESSION_BRANCH:-}"; return 1; fi
+  return 0
+}
+
+release_required_dev_lock() {
+  [[ -n "${DEV_LOCK_URL:-}" && -n "${REQUIRED_LOCK_OWNER:-}" ]] || return 0
+  curl -s -X POST "${DEV_LOCK_URL}/release" -H "Content-Type: application/json" \
+    -d "{\"owner\": \"${REQUIRED_LOCK_OWNER}\"}" >/dev/null 2>&1 || warn "Failed to release dev-env lock."
+}
+
+# run_full_cluster_regression <issue> <branch>
+# Acquires separately for integration and E2E, enforcing API deploy -> spot ->
+# api-wired -> frontend deploy -> E2E ordering. Sets CLUSTER_REGRESSION_EXIT: 0 pass, 1 branch
+# failure, 2 infrastructure/setup block.
+run_full_cluster_regression() {
+  local issue_number="$1" branch="$2" output exit_code=0
+  CURRENT_REGRESSION_BRANCH="$branch"
+  CLUSTER_REGRESSION_EXIT=0
+  [[ -d tests/integration/spot && -d tests/integration/api_wired && -d tests/e2e ]] || {
+    CLUSTER_REGRESSION_EXIT=2; regression_blocked "$issue_number" "required integration or E2E test directory is missing" "$branch"; return 0; }
+  if ! acquire_required_dev_lock "$issue_number" "full regression"; then CLUSTER_REGRESSION_EXIT=2; return 0; fi
+
+  if ! deploy_branch_api "$DEV_ENV_FILE"; then
+    release_required_dev_lock
+    if [[ "$DEPLOY_FAILURE_KIND" == "infrastructure" ]]; then
+      CLUSTER_REGRESSION_EXIT=2; regression_blocked "$issue_number" "API deploy could not reach or operate the development environment" "$branch"
+    else
+      CLUSTER_REGRESSION_EXIT=1; post_result "$branch" "Deploy (API)" 1 "Branch API build/deploy failed."
+    fi
+    return 0
+  fi
+  exit_code=0; output=$(ENV_FILE="$DEV_ENV_FILE" DATASPOKE_DEV_LOCK_PREACQUIRED=1 with_dev_env "$DEV_ENV_FILE" uv run pytest tests/integration/spot/ --tb=short 2>&1) || exit_code=$?
+  post_result "$branch" "Integration (spot)" "$exit_code" "$output"; [[ "$exit_code" -eq 0 ]] || CLUSTER_REGRESSION_EXIT=1
+  exit_code=0; output=$(ENV_FILE="$DEV_ENV_FILE" DATASPOKE_DEV_LOCK_PREACQUIRED=1 with_dev_env "$DEV_ENV_FILE" uv run pytest tests/integration/api_wired/ --tb=short 2>&1) || exit_code=$?
+  post_result "$branch" "Integration (api-wired)" "$exit_code" "$output"; [[ "$exit_code" -eq 0 ]] || CLUSTER_REGRESSION_EXIT=1
+  # E2E reset-seeds independently and frontend deployment rolls the API, so it
+  # must acquire after the integration group has fully released its lock.
+  release_required_dev_lock
+  if ! acquire_required_dev_lock "$issue_number" "full regression E2E"; then CLUSTER_REGRESSION_EXIT=2; return 0; fi
+  if ! deploy_branch_frontend "$DEV_ENV_FILE"; then
+    release_required_dev_lock
+    if [[ "$DEPLOY_FAILURE_KIND" == "infrastructure" ]]; then
+      CLUSTER_REGRESSION_EXIT=2; regression_blocked "$issue_number" "frontend deploy could not reach or operate the development environment" "$branch"
+    else
+      CLUSTER_REGRESSION_EXIT=1; post_result "$branch" "Deploy (frontend)" 1 "Branch frontend build/deploy failed."
+    fi
+    return 0
+  fi
+  if ! pnpm -C tests/e2e install --frozen-lockfile >/dev/null 2>&1 || ! pnpm -C tests/e2e exec playwright install chromium >/dev/null 2>&1; then
+    release_required_dev_lock; CLUSTER_REGRESSION_EXIT=2; regression_blocked "$issue_number" "E2E runner/browser setup failed" "$branch"; return 0
+  fi
+  exit_code=0; output=$(ENV_FILE="$DEV_ENV_FILE" DATASPOKE_DEV_LOCK_PREACQUIRED=1 with_dev_env "$DEV_ENV_FILE" pnpm -C tests/e2e test 2>&1) || exit_code=$?
+  post_result "$branch" "E2E" "$exit_code" "$output"; [[ "$exit_code" -eq 0 ]] || CLUSTER_REGRESSION_EXIT=1
+  release_required_dev_lock
+}
+
+# run_post_pr_regression <issue> <branch>
+# Repeats the complete regression after every worker fix, and does not let a
+# setup/cluster condition invoke a code-fix worker. Returns success only when
+# the final pushed PR head is ready for review.
+run_post_pr_regression() {
+  local issue_number="$1" branch="$2" attempt max_retries
+  if ! branch_is_code_affecting "$branch"; then
+    info "Diff is confined to the explicit non-code exclusion set; full regression is not required."
+    return 0
+  fi
+  [[ -n "$issue_number" ]] || { warn "No issue number for regression gate."; return 1; }
+  max_retries="${PRAUTO_REGRESSION_FIX_MAX_RETRIES:-2}"
+  POST_PR_REGRESSION_SUMMARY_MODE=true
+  for (( attempt=0; attempt<=max_retries; attempt++ )); do
+    POST_PR_FAILED_STAGES=""
+    run_static_and_unit_regression "$branch"
+    if [[ "$LOCAL_REGRESSION_EXIT" -eq 2 ]]; then
+      regression_blocked "$issue_number" "$LOCAL_REGRESSION_REASON" "$branch"
+      POST_PR_REGRESSION_SUMMARY_MODE=false
+      return 1
+    fi
+    run_full_cluster_regression "$issue_number" "$branch"
+    if [[ "$CLUSTER_REGRESSION_EXIT" -eq 2 ]]; then
+      POST_PR_REGRESSION_SUMMARY_MODE=false
+      return 1
+    fi
+    if [[ "$LOCAL_REGRESSION_EXIT" -eq 0 && "$CLUSTER_REGRESSION_EXIT" -eq 0 ]]; then
+      if ! post_post_pr_regression_comment "$branch" "Full post-PR regression passed for the current pushed PR head."; then
+        regression_blocked "$issue_number" "required regression success notice could not be posted" "$branch"
+        POST_PR_REGRESSION_SUMMARY_MODE=false
+        return 1
+      fi
+      POST_PR_REGRESSION_SUMMARY_MODE=false
+      return 0
+    fi
+    if [[ "$attempt" -ge "$max_retries" ]]; then
+      regression_set_wip "$issue_number" "$branch"
+      post_post_pr_regression_comment "$branch" "Post-PR regression is still failing after ${max_retries} fix attempt(s); the PR remains in prauto:wip."
+      POST_PR_REGRESSION_SUMMARY_MODE=false
+      return 1
+    fi
+    # This is intentionally posted before the worker is launched, so PR
+    # readers know why the branch may change while it remains in WIP.
+    if ! post_post_pr_regression_comment "$branch" "Post-PR regression failed: ${POST_PR_FAILED_STAGES:-an unclassified branch-attributable stage}. Generator/reviewer agents will fix this before the full regression reruns."; then
+      regression_blocked "$issue_number" "required regression failure notice could not be posted" "$branch"
+      POST_PR_REGRESSION_SUMMARY_MODE=false
+      return 1
+    fi
+    info "Full regression failed; invoking the worker fix workflow before rerunning every layer."
+    run_integration_fix_session "$issue_number" "$branch" "Full post-PR regression failed in: ${POST_PR_FAILED_STAGES:-an unclassified branch-attributable stage}. Diagnose and fix the branch-attributable failure, then preserve the generator/reviewer contract."
+    checkpoint_branch "$issue_number" "$branch"
+    push_branch "$branch"
+    create_or_update_pr "$issue_number" "" "$branch"
+  done
+  POST_PR_REGRESSION_SUMMARY_MODE=false
+  return 1
+}
+
+# run_pre_pr_selected_verification <issue> <branch>
+# The current selector is intentionally conservative: it selects the full
+# affected layer while per-test impact metadata is unavailable.  It never runs
+# an unrelated cluster layer, and it never turns uncertainty into an omission.
+run_pre_pr_selected_verification() {
+  local issue_number="$1" branch="$2"
+  if ! branch_is_code_affecting "$branch"; then
+    info "Pre-PR verification: explicit non-code diff; no code-test layer selected."
+    return 0
+  fi
+  info "Pre-PR verification: selected full static/unit suites (conservative impact fallback)."
+  run_static_and_unit_regression "$branch"
+  if [[ "$LOCAL_REGRESSION_EXIT" -eq 2 ]]; then regression_blocked "$issue_number" "$LOCAL_REGRESSION_REASON" "$branch"; return 1; fi
+  if [[ "$LOCAL_REGRESSION_EXIT" -ne 0 ]]; then
+    info "Pre-PR static/unit failure will be handled by the mandatory post-PR fix gate."
+  fi
+  if diff_touches src/api/ src/backend/ src/shared/ tests/integration/; then
+    info "Pre-PR verification: selected spot and api-wired suites (conservative affected-layer fallback)."
+    run_integration_test_fix "$issue_number" "$branch"
+  fi
+  if diff_touches src/frontend/ src/api/ tests/e2e/; then
+    info "Pre-PR verification: selected E2E suite (conservative affected-layer fallback)."
+    run_e2e_test_fix "$issue_number" "$branch"
+  fi
+}
+
 # fetch_approved_plan <issue_number>
 # Fetch the latest plan comment's plan body (scoped to lifecycle). Sets
 # APPROVED_PLAN_TEXT.
@@ -481,8 +750,20 @@ run_integration_test_fix() {
 # deploy_branch_api <env_file>
 # Deploy the branch's API (--components api) from the worktree, targeting the
 # $REPO_DIR-anchored env file. ORDERING: must precede deploy_branch_frontend.
+classify_deploy_failure() {
+  local deploy_output="$1"
+  # Fail closed: only a small set of affirmative source-build/chart-validation
+  # diagnostics is branch-attributable. Registry, Helm, resource, rollout, or
+  # unknown failures are infrastructure until a human can diagnose them.
+  DEPLOY_FAILURE_KIND="infrastructure"
+  if printf '%s' "$deploy_output" | grep -Eqi 'failed to solve.*(Dockerfile|COPY|RUN)|Dockerfile.*(error|failed)|(^|[^[:alpha:]])(tsc|typescript|eslint|mypy|ruff)[^[:alpha:]].*(error|failed)|chart.*(schema|validation).*(error|failed)|values.*(invalid|required|must be)|template.*(executing|error).*\.yaml'; then
+    DEPLOY_FAILURE_KIND="branch"
+  fi
+}
+
 deploy_branch_api() {
   local env_file="$1"
+  DEPLOY_FAILURE_KIND="infrastructure"
   local install_script="${WORKTREE_DIR:-}/helm-charts/bin/install.sh"
   [[ -z "${WORKTREE_DIR:-}" ]] || [[ ! -f "$install_script" ]] && { warn "Branch install.sh not found. Cannot deploy API."; return 1; }
   local tool
@@ -493,7 +774,7 @@ deploy_branch_api() {
   info "Building and deploying the branch API..."
   local deploy_output deploy_exit=0
   deploy_output=$(bash "$install_script" --profile dev --components api --env-file "$env_file" 2>&1) || deploy_exit=$?
-  if [[ "$deploy_exit" -ne 0 ]]; then warn "API deploy failed (exit ${deploy_exit}):"; warn "$deploy_output"; return 1; fi
+  if [[ "$deploy_exit" -ne 0 ]]; then classify_deploy_failure "$deploy_output"; warn "API deploy failed (exit ${deploy_exit}, ${DEPLOY_FAILURE_KIND}):"; warn "$deploy_output"; return 1; fi
   info "Branch API deployed and rolled."
   return 0
 }
@@ -501,6 +782,7 @@ deploy_branch_api() {
 # deploy_branch_frontend <env_file>
 deploy_branch_frontend() {
   local env_file="$1"
+  DEPLOY_FAILURE_KIND="infrastructure"
   local install_script="${WORKTREE_DIR:-}/helm-charts/bin/install.sh"
   local ns
   ns=$(env_file_value "$env_file" "DATASPOKE_KUBE_DATASPOKE_NAMESPACE"); ns="${ns:-dataspoke-01}"
@@ -513,17 +795,17 @@ deploy_branch_frontend() {
   info "Building and deploying the branch frontend..."
   local deploy_output deploy_exit=0
   deploy_output=$(bash "$install_script" --profile dev --components frontend --env-file "$env_file" 2>&1) || deploy_exit=$?
-  if [[ "$deploy_exit" -ne 0 ]]; then warn "Frontend deploy failed (exit ${deploy_exit}):"; warn "$deploy_output"; return 1; fi
+  if [[ "$deploy_exit" -ne 0 ]]; then classify_deploy_failure "$deploy_output"; warn "Frontend deploy failed (exit ${deploy_exit}, ${DEPLOY_FAILURE_KIND}):"; warn "$deploy_output"; return 1; fi
 
   info "Forcing a frontend rollout restart..."
-  kubectl rollout restart deployment/dataspoke-frontend -n "$ns" >/dev/null 2>&1 || { warn "Could not restart frontend in ${ns}."; return 1; }
+  kubectl rollout restart deployment/dataspoke-frontend -n "$ns" >/dev/null 2>&1 || { DEPLOY_FAILURE_KIND="infrastructure"; warn "Could not restart frontend in ${ns}."; return 1; }
 
   local deployment status_exit
   for deployment in dataspoke-frontend dataspoke-api; do
     info "Waiting for ${deployment} rollout..."
     status_exit=0
     kubectl rollout status "deployment/${deployment}" -n "$ns" --timeout=5m >/dev/null 2>&1 || status_exit=$?
-    [[ "$status_exit" -ne 0 ]] && { warn "${deployment} did not become ready in ${ns}."; return 1; }
+    [[ "$status_exit" -ne 0 ]] && { DEPLOY_FAILURE_KIND="infrastructure"; warn "${deployment} did not become ready in ${ns}."; return 1; }
   done
   info "Branch frontend deployed and rolled."
   return 0
@@ -740,10 +1022,9 @@ implement_and_finalize() {
     return 0
   fi
 
-  # Ordering is a correctness constraint: integration (API deploy) must precede
-  # E2E (frontend deploy) and never run concurrently.
-  run_integration_test_fix "$issue_number" "$branch"
-  run_e2e_test_fix "$issue_number" "$branch"
+  # Selected pre-PR verification is an iteration aid; the post-PR gate below
+  # remains the only readiness authority and always reruns the complete suite.
+  run_pre_pr_selected_verification "$issue_number" "$branch" || return 0
   finalize_issue_pr "$branch" "$issue_number" "$issue_title"
 }
 

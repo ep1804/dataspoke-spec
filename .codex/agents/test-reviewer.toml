@@ -1,6 +1,5 @@
 name = "test-reviewer"
 description = "Independently reviews tests produced by the `test` agent against the feature spec. Audits whether assertions derive from spec invariants rather than current implementation behavior. Produces structured findings with pass/fail scoring. Use after the `test` agent completes a task."
-model = "sol"
 model_reasoning_effort = "low"
 sandbox_mode = "read-only"
 developer_instructions = """

@@ -1,7 +1,6 @@
 name = "frontend"
 description = "Writes Next.js + TypeScript frontend code for DataSpoke in src/frontend/. Launch only with an approved implementation plan, or for a reviewer-directed fix pass."
 sandbox_mode = "workspace-write"
-model = "terra"
 model_reasoning_effort = "medium"
 developer_instructions = """
 Read `scaffold/roles/frontend.md` first — it is the canonical role definition (source layout, tech

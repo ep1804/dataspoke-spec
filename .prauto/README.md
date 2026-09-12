@@ -43,11 +43,21 @@ agent itself when `PRAUTO_AGENT` is unset or `auto`).
 ## Agent session adapters
 
 Claude and Codex use different session contracts. A fresh Claude invocation receives a harness
-generated `--session-id` and later resumes with that value. A fresh Codex invocation is always
-`codex exec --json --sandbox workspace-write`; the executor records its native `thread_id` only
-from the JSONL `thread.started` event. A later continuation is exactly
-`codex exec resume --json <thread-id> <prompt>` — no Claude-only session, sandbox, tool, turn, or
-budget flags are applied.
+generated `--session-id` and later resumes with that value. A fresh Codex invocation uses
+`codex exec --json --sandbox workspace-write`. By default it omits an explicit model and inherits
+the authenticated account's Codex default; configured compatible model/effort overrides are passed
+only as a pair for the fresh invocation. An effort without a model is invalid. The executor records
+its native `thread_id` only from the JSONL
+`thread.started` event. A later continuation is exactly `codex exec resume --json <thread-id>
+<prompt>`: the native thread retains its model and reasoning settings, so the executor does not
+reinject them. No Claude-only session, sandbox, tool, turn, or budget flags are applied.
+
+Codex model availability varies by client and authenticated account. `PRAUTO_CODEX_MODEL` is
+optional; Codex role bindings also omit a hard-coded model so they inherit that account default.
+Before a configured model or effort override is used, the executor preflights compatibility. A
+rejected or invalid override fails closed before Codex is invoked, leaves the work item non-ready,
+and produces diagnostic evidence. It is a configuration/account-compatibility outcome, never a
+quota pause, and PRauto never silently selects a replacement model.
 
 When the harness regains control after a worker invocation, it best-effort pushes any committed
 checkpoint on the issue branch, links that branch to the issue, and posts one idempotent issue
@@ -70,8 +80,9 @@ remains the SSOT for phase state.
 - `git`, `jq`.
 
 The integration and E2E stages additionally need a reachable dev cluster; see
-`spec/AI_PRAUTO.md §Dev Cluster and Deploys`. Each stage skips itself when its dependencies are
-absent.
+`spec/AI_PRAUTO.md §Dev Cluster and Deploys`. The executor provisions its own cluster when
+needed. A required cluster, lock, or provisioning failure blocks PR readiness rather than
+counting as a passing skipped regression.
 
 ## Configuration knobs (contract)
 
@@ -83,6 +94,8 @@ absent.
 | `PRAUTO_BRANCH_PREFIX` | `prauto/` | Branch prefix (`prauto/I-<n>`) |
 | `PRAUTO_WORKER_ID` | (set per instance) | Instance identity — unique per worker on a shared repo |
 | `PRAUTO_AGENT` | `auto` | `claude` \| `codex` \| `auto` (Claude then Codex) |
+| `PRAUTO_CODEX_MODEL` | (unset) | Optional fresh-session override; when unset, Codex inherits the authenticated account's default model |
+| `PRAUTO_CODEX_EFFORT` | (unset) | Required with `PRAUTO_CODEX_MODEL` as its fresh-session override pair; invalid alone; resumed threads retain their existing setting |
 | `PRAUTO_OPEN_ISSUE_LIMIT` | `1` | Max open issues this worker holds concurrently |
 | `PRAUTO_MAX_RETRIES_PER_JOB` | `4` | Heartbeat-marked attempts before abandonment; counted separately for each `prauto:ready` label lifecycle |
 | `PRAUTO_DEV_ENV_FILE` | `helm-charts/.env.dev` | This worker's dedicated dev-cluster env file; resolves under the repo checkout, never a worktree |

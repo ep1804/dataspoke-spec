@@ -1,6 +1,5 @@
 name = "reviewer"
 description = "Independently reviews generated code against the feature spec and implementation plan. Produces structured findings with pass/fail scoring. Use after a code generator agent (backend, airflow-dag, frontend) completes a task. For tests, use `test-reviewer`."
-model = "sol"
 model_reasoning_effort = "low"
 sandbox_mode = "read-only"
 developer_instructions = """

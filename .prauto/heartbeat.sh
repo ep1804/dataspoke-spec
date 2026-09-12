@@ -277,18 +277,32 @@ if [[ "${ALL_CLAIMED_COUNT:-0}" -gt 0 ]]; then
             fetch_approved_plan "$CUR_ISSUE_NUMBER"
             checkout_branch_worktree "$REVIEW_PR_BRANCH"
             cd "$WORKTREE_DIR"
+            # Feedback changes invalidate the prior readiness result.  Return
+            # the issue/PR to WIP before work, then use the same exact-head
+            # post-PR gate as a newly-created PR.
+            if ! regression_set_wip "$CUR_ISSUE_NUMBER" "$REVIEW_PR_BRANCH"; then
+              warn "Cannot establish WIP state for feedback on #${CUR_ISSUE_NUMBER}; retrying later."
+              cleanup_worktree
+              claim_i=$((claim_i + 1)); continue
+            fi
             run_pr_review "$CUR_ISSUE_NUMBER" "$REVIEW_PR_BRANCH" "$ACTIONABLE_COMMENTS" "$APPROVED_PLAN_TEXT"
             checkpoint_branch "$CUR_ISSUE_NUMBER" "$REVIEW_PR_BRANCH"
-            run_integration_test_fix "$CUR_ISSUE_NUMBER" "$REVIEW_PR_BRANCH"
             push_branch "$REVIEW_PR_BRANCH"
             link_branch_to_issue "$CUR_ISSUE_NUMBER" "$REVIEW_PR_BRANCH" || true
             publish_commit_checkpoints "$CUR_ISSUE_NUMBER" "$REVIEW_PR_BRANCH" || true
             create_or_update_pr "$CUR_ISSUE_NUMBER" "" "$REVIEW_PR_BRANCH"
-            run_and_post_test_results "$REVIEW_PR_BRANCH"
-            post_review_response_comment "$REVIEW_PR_NUMBER" "$REVIEW_RESPONSE"
-            post_feedback_addressed_comment "$REVIEW_PR_NUMBER"
-            complete_job "$CUR_ISSUE_NUMBER"
-            info "PR review complete for #${CUR_ISSUE_NUMBER}."
+            if run_post_pr_regression "$CUR_ISSUE_NUMBER" "$REVIEW_PR_BRANCH"; then
+              if regression_ready "$CUR_ISSUE_NUMBER" "$REVIEW_PR_BRANCH"; then
+                post_review_response_comment "$REVIEW_PR_NUMBER" "$REVIEW_RESPONSE"
+                post_feedback_addressed_comment "$REVIEW_PR_NUMBER"
+                complete_job "$CUR_ISSUE_NUMBER"
+                info "PR review complete and regression-gated for #${CUR_ISSUE_NUMBER}."
+              else
+                warn "Regression passed but review labels could not be established for #${CUR_ISSUE_NUMBER}."
+              fi
+            else
+              warn "PR feedback fix for #${CUR_ISSUE_NUMBER} is not review-ready; it remains in prauto:wip."
+            fi
             cleanup_worktree
             ;;
         esac

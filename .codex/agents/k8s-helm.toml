@@ -1,7 +1,6 @@
 name = "k8s-helm"
 description = "Writes Helm charts, Dockerfiles, Kubernetes manifests, and dev environment scripts for DataSpoke components. Launch only with an approved implementation plan; no review loop."
 sandbox_mode = "workspace-write"
-model = "terra"
 model_reasoning_effort = "medium"
 developer_instructions = """
 Read `scaffold/roles/k8s-helm.md` first — it is the canonical role definition (directory layout,

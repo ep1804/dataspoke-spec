@@ -21,6 +21,53 @@ AGENT_SESSION_ID=""
 AGENT_OUTPUT=""
 AGENT_STATUS=""
 
+# codex_model_is_supported <model>
+# PRauto accepts only formal model identifiers when a deployment explicitly
+# opts into `codex exec -m`. An empty value means inherit the authenticated
+# account's Codex default model. Do not pass legacy role aliases (for example,
+# "terra") through to the CLI: they are not valid identifiers.
+codex_model_is_supported() {
+  case "$1" in
+    ""|gpt-5.6|gpt-5.6-terra|gpt-5.6-luna) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# codex_effort_is_supported <effort>
+# Keep the explicit override contract narrow and aligned with the Codex
+# reasoning-effort values supported by the configured model family.
+codex_effort_is_supported() {
+  case "$1" in
+    low|medium|high|xhigh|max|ultra) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# validate_codex_override
+# The model and effort are an atomic explicit override. A missing pair leaves
+# both CLI flags absent so Codex uses account defaults; a partial/invalid pair
+# fails before an external Codex invocation.
+validate_codex_override() {
+  local model="${PRAUTO_CODEX_MODEL-}"
+  local effort="${PRAUTO_CODEX_EFFORT-}"
+  if [[ -z "$model" && -z "$effort" ]]; then
+    return 0
+  fi
+  if [[ -z "$model" || -z "$effort" ]]; then
+    warn "PRAUTO_CODEX_MODEL and PRAUTO_CODEX_EFFORT must be set together, or both left unset."
+    return 1
+  fi
+  if ! codex_model_is_supported "$model"; then
+    warn "Invalid PRAUTO_CODEX_MODEL='${model}'. Use one of: gpt-5.6, gpt-5.6-terra, gpt-5.6-luna."
+    return 1
+  fi
+  if ! codex_effort_is_supported "$effort"; then
+    warn "Invalid PRAUTO_CODEX_EFFORT='${effort}'. Use one of: low, medium, high, xhigh, max, ultra."
+    return 1
+  fi
+  return 0
+}
+
 # select_agent — probe per PRAUTO_AGENT and set ACTIVE_AGENT.
 #   claude -> probe claude only; codex -> codex only; auto -> claude then codex.
 # Returns 0 (and sets ACTIVE_AGENT) or 1 if neither agent is available.
@@ -164,12 +211,27 @@ invoke_agent() {
   local -a cmd
 
   if [[ "$ACTIVE_AGENT" == "codex" ]]; then
+    if ! validate_codex_override; then
+      AGENT_SESSION_ID=""
+      AGENT_OUTPUT="Invalid Codex model/effort override; Codex was not invoked."
+      AGENT_STATUS=error
+      return 0
+    fi
     # Codex deliberately receives none of Claude's session/tool/turn/budget
     # flags. Its thread id is emitted in JSONL after startup.
-    cmd=(codex exec --json --sandbox workspace-write
-      -m "${PRAUTO_CODEX_MODEL:-terra}"
-      -c "model_reasoning_effort=${PRAUTO_CODEX_EFFORT:-medium}")
-    cmd+=("$prompt")
+    cmd=(codex exec --json --sandbox workspace-write)
+    # ChatGPT-authenticated Codex accounts can reject an explicit `-m` even
+    # for formal identifiers. With no model override, leave both model knobs
+    # absent so the CLI uses its account-default model and reasoning settings.
+    # API/account environments that opt into an explicit model receive its
+    # configured reasoning effort as the same deliberate override.
+    if [[ -n "${PRAUTO_CODEX_MODEL-}" ]]; then
+      cmd+=(-m "$PRAUTO_CODEX_MODEL"
+        -c "model_reasoning_effort=$PRAUTO_CODEX_EFFORT")
+    fi
+    # `--` prevents a prompt beginning with '-' from being parsed as a Codex
+    # option. It follows all explicit fresh-session options.
+    cmd+=(-- "$prompt")
   else
     cmd=(claude -p "$prompt"
       --append-system-prompt-file "$system_file"
@@ -277,7 +339,9 @@ resume_agent() {
   if [[ "$ACTIVE_AGENT" == "codex" ]]; then
     # Resume accepts the agent-native id and prompt only; do not append fresh
     # execution options (sandbox/tool/turn/budget/session flags are Claude-only).
-    cmd=(codex exec resume --json "$session_id" "$prompt")
+    # The documented resume grammar is [SESSION_ID] [PROMPT]; `--` protects
+    # either positional value from option parsing without changing that order.
+    cmd=(codex exec resume --json -- "$session_id" "$prompt")
   else
     cmd=(claude -p "$prompt"
       --resume "$session_id"

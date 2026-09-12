@@ -26,6 +26,24 @@ scrub_secrets() {
 }
 
 # create_or_update_pr <issue_number> <issue_title> <branch>
+set_pr_wip_label() {
+  local branch="$1"
+  get_pr_number_for_branch "$branch"
+  [[ -n "${BRANCH_PR_NUMBER:-}" ]] || return 1
+  gh pr edit "$BRANCH_PR_NUMBER" -R "$PRAUTO_GITHUB_REPO" \
+    --remove-label "$PRAUTO_GITHUB_LABEL_REVIEW" \
+    --add-label "$PRAUTO_GITHUB_LABEL_WIP" 2>/dev/null || return 1
+}
+
+set_pr_review_label() {
+  local branch="$1"
+  get_pr_number_for_branch "$branch"
+  [[ -n "${BRANCH_PR_NUMBER:-}" ]] || return 1
+  gh pr edit "$BRANCH_PR_NUMBER" -R "$PRAUTO_GITHUB_REPO" \
+    --remove-label "$PRAUTO_GITHUB_LABEL_WIP" \
+    --add-label "$PRAUTO_GITHUB_LABEL_REVIEW" 2>/dev/null || return 1
+}
+
 create_or_update_pr() {
   local issue_number="$1" issue_title="$2" branch="$3"
   local existing_pr
@@ -42,6 +60,9 @@ create_or_update_pr() {
 \`\`\`
 ${commit_log}
 \`\`\`" 2>/dev/null || warn "Failed to comment on PR #${existing_pr}."
+    gh pr edit "$existing_pr" -R "$PRAUTO_GITHUB_REPO" \
+      --remove-label "$PRAUTO_GITHUB_LABEL_REVIEW" \
+      --add-label "$PRAUTO_GITHUB_LABEL_WIP" 2>/dev/null || warn "Failed to set PR #${existing_pr} to prauto:wip."
     return 0
   fi
 
@@ -68,7 +89,7 @@ ${commit_log}
   gh pr create -R "$PRAUTO_GITHUB_REPO" \
     --base "$PRAUTO_BASE_BRANCH" --head "$branch" \
     --title "$issue_title" --body "$pr_body" \
-    --assignee "$PRAUTO_GITHUB_ACTOR" --label "${PRAUTO_GITHUB_LABEL_REVIEW}" \
+    --assignee "$PRAUTO_GITHUB_ACTOR" --label "${PRAUTO_GITHUB_LABEL_WIP}" \
     "${reviewer_flag[@]}" || error "Failed to create PR for ${branch}."
   info "PR created for issue #${issue_number}."
 }
