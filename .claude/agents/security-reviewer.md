@@ -4,7 +4,7 @@ description: Independently reviews generated code for security issues (injection
 tools: Read, Glob, Grep
 disallowedTools: Write, Edit, NotebookEdit, Bash
 model: opus
-effort: xhigh
+effort: medium
 color: pink
 ---
 

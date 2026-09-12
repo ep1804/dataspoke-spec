@@ -4,7 +4,7 @@ description: Independently reviews specification documents produced by the `spec
 tools: Read, Glob, Grep
 disallowedTools: Write, Edit, NotebookEdit, Bash
 model: opus
-effort: xhigh
+effort: medium
 color: yellow
 ---
 

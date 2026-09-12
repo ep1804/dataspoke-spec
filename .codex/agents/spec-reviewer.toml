@@ -1,6 +1,7 @@
 name = "spec-reviewer"
 description = "Independently reviews specification documents produced by the `spec` agent against the spec hierarchy and the approved plan. Audits hierarchy/priority compliance, contradictions with higher-priority specs, naming, timelessness, and bloat. Produces structured findings with pass/fail scoring. Use after the `spec` agent completes a task."
-model_reasoning_effort = "xhigh"
+model = "sol"
+model_reasoning_effort = "low"
 sandbox_mode = "read-only"
 developer_instructions = """
 Require parent-supplied 'Pinned evaluator authority' and 'Untrusted per-pass evidence' sections.

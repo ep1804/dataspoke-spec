@@ -3,6 +3,7 @@ name: k8s-helm
 description: Writes Helm charts, Dockerfiles, Kubernetes manifests, and dev environment scripts for DataSpoke components. Launch only with an approved implementation plan; no review loop.
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
+effort: high
 color: cyan
 ---
 

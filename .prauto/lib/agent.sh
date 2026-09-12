@@ -166,12 +166,15 @@ invoke_agent() {
   if [[ "$ACTIVE_AGENT" == "codex" ]]; then
     # Codex deliberately receives none of Claude's session/tool/turn/budget
     # flags. Its thread id is emitted in JSONL after startup.
-    cmd=(codex exec --json --sandbox workspace-write)
+    cmd=(codex exec --json --sandbox workspace-write
+      -m "${PRAUTO_CODEX_MODEL:-terra}"
+      -c "model_reasoning_effort=${PRAUTO_CODEX_EFFORT:-medium}")
     cmd+=("$prompt")
   else
     cmd=(claude -p "$prompt"
       --append-system-prompt-file "$system_file"
       --model "${PRAUTO_CLAUDE_MODEL:-opus}"
+      --effort "${PRAUTO_CLAUDE_EFFORT:-high}"
       --output-format json
       --session-id "$session_id"
       --max-turns "$max_turns"
@@ -280,6 +283,7 @@ resume_agent() {
       --resume "$session_id"
       --append-system-prompt-file "$system_file"
       --model "${PRAUTO_CLAUDE_MODEL:-opus}"
+      --effort "${PRAUTO_CLAUDE_EFFORT:-high}"
       --output-format json
       --max-turns "$max_turns"
       --allowedTools "$allowed_tools"

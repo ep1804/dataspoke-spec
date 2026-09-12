@@ -4,7 +4,7 @@ description: Independently reviews tests produced by the `test` agent against th
 tools: Read, Glob, Grep
 disallowedTools: Write, Edit, NotebookEdit, Bash
 model: opus
-effort: xhigh
+effort: medium
 color: orange
 ---
 

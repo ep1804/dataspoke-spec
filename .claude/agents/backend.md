@@ -3,6 +3,7 @@ name: backend
 description: Writes FastAPI/Python backend code for DataSpoke across src/api/, src/backend/, and src/shared/. Launch only with an approved implementation plan, or for a reviewer-directed fix pass.
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
+effort: high
 skills:
   - datahub-api
 color: blue

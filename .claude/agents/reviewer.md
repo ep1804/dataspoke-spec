@@ -4,7 +4,7 @@ description: Independently reviews generated code against the feature spec and i
 tools: Read, Glob, Grep
 disallowedTools: Write, Edit, NotebookEdit, Bash
 model: opus
-effort: xhigh
+effort: medium
 color: orange
 ---
 

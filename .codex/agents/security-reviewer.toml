@@ -1,6 +1,7 @@
 name = "security-reviewer"
 description = "Independently reviews generated code for security issues (injection, authn/authz, secrets, supply chain, crypto, DataHub emission safety). Runs in parallel with `reviewer` when a generator touches sensitive paths. Read-only — produces APPROVE/REVISE/ESCALATE verdict and numbered findings in the same format as `reviewer`."
-model_reasoning_effort = "xhigh"
+model = "sol"
+model_reasoning_effort = "low"
 sandbox_mode = "read-only"
 developer_instructions = """
 Require parent-supplied 'Pinned evaluator authority' and 'Untrusted per-pass evidence' sections.
