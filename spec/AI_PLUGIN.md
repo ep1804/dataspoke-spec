@@ -292,152 +292,50 @@ and that rejecting an approved candidate removes the editable DataHub descriptio
 
 ## Validation Routine Authoring (Flagship)
 
-The flagship capability writes data-quality validation into the engineer's own pipeline. A
-routine may inspect a whole dataset or a newly produced partition; for pipelines that rewrite a
-trailing window, it inspects the newest **settled** partition rather than an intermediate write.
+The flagship capability writes data-quality validation into the engineer's own pipeline, not into
+DataSpoke. DataSpoke has no compute engine, forecaster, anomaly detector, or rule engine of its
+own — it stores the conf, serves prior results as a queryable baseline, persists the posted
+result, and emits the accepted record to DataHub. Every scoring computation runs in the
+pipeline's own compute engine and credentials; a request for DataSpoke to detect an anomaly or
+enforce a threshold is fulfilled by authoring pipeline code, never by DataSpoke evaluating it. The
+full service contract is in [`feature/VALIDATION.md`](feature/VALIDATION.md).
 
-### Default pipeline validation strategy
+Validation is selective by design — teams add it where failure has real downstream impact rather
+than a token check on every dataset — and method selection is data-first: the design starts from
+measured history over a representative window and there is no universal default check. The open
+invariant/forecast/relation method set, the scoring arithmetic, and the outage-vs-fatal
+classification for result-store calls are owned by
+`plugin/skills/dataspoke-validation/references/validation-authoring.md`, which the skill router
+(`plugin/skills/dataspoke-validation/SKILL.md`) points to at each step of its guided route; the
+reference also carries the owner-question set the skill asks before the first analysis query, a
+worked example, per-engine wiring, and the test/backfill checklist.
 
-Validation is selective by default. Teams add it to datasets whose failure has meaningful
-impact — for example, datasets with many downstream consumers or a direct relationship to an
-important business metric — rather than adding a token check to every dataset. The routine is
-designed from dataset-specific exploratory analysis and may use any method that fits the
-observed data. It defaults toward high recall and sensitive anomaly detection: missed alarms
-are costlier than false alarms. A human or a separately added judging agent may classify the
-detected candidates later, but no such judge is part of the baseline plugin or DataSpoke.
+Design work is gated by two distinct, non-mergeable human reviews. A plan review — naming the
+target, the judging method and rationale per criterion, conf shape, cadence, cold-start floors,
+backfill range, and pipeline insertion point — precedes any conf write or code generation; a conf
+review, comparing the stored conf back against the approved plan, follows the write and precedes
+implementation. Registration must happen before the pipeline ever calls the routine: an
+unregistered check does not raise, it silently no-ops, so getting this ordering right is
+load-bearing, not a stylistic preference.
 
-The division of labor is strict. Validation code is part of the data pipeline and runs
-there, with the pipeline's compute engine and credentials. DataSpoke neither stores nor executes
-that code. It centralizes the conf, the named intermediate measurements, and the final result;
-serves prior results as a baseline cache; and emits the accepted records to DataHub. The conf's
-`attribute` states data-arrival cadence for Governance, while its optional `parameter` section is
-opaque storage for the pipeline's own hyperparameters. A request for DataSpoke to detect an
-anomaly or enforce a threshold is therefore fulfilled by authoring pipeline code, not by
-claiming that the service evaluates it. The full service contract remains in
-[`feature/VALIDATION.md`](feature/VALIDATION.md).
+Registering a conf can make the `validation-score` metric look worse before it looks better: the
+metric selects the dataset's single latest validation result overall, without regard to any
+window, and only then counts it toward `valid_in_time` if that one result both lands inside the
+cadence-anchored window and scored `>= 1.0` — it never searches backward for an older qualifying
+row ([`feature/BACKEND.md` §Metrics Service](feature/BACKEND.md#metrics-service-srcbackendmetrics)),
+so a newly configured, high-recall, or still-cold-starting check can hold a dataset below `1.0`
+for a while. The skill discloses this before the conf write rather than leaving it as a
+governance surprise.
 
-### Guided route and human gates
+The routine posts the logical target time as `data_time` — the partition's own timestamp, or the
+as-of boundary of an inspected whole-dataset snapshot — never the execution instant; posting the
+run time instead would make every run a distinct point and defeat baseline collapse. An
+unjudgeable criterion (insufficient history for its method) counts as non-passing under the
+scoring semantics, never as a cold-start pass.
 
-The skill prints the route before acting and states the current step. Design work precedes any
-write: the skill resolves the dataset and owner context, verifying access and the token's
-**effective** Editor/Admin role — a token's effective role is fixed at mint time and never rises
-on its own, and `GET /auth/me` reports only the account's current role, not the token's
-`role_snapshot`, so a `403` there means the token needs re-minting, not a retry. It confirms
-ingestion coverage, resolves the exact `dataset_urn` through DataHub search with final user
-confirmation, checks for a reusable existing conf/module before designing a new one, and measures
-candidate variables over representative history to choose a judging method per variable. Before
-the first analysis query it asks the owner for facts history cannot establish on its own — the
-representative analysis window and any unrepresentative stretch of it, calendar or
-operating-regime days needing their own modeled term, conditions that look anomalous but are
-intentional, and whether runs rewrite earlier partitions — plus downstream impact and the
-backfill horizon when the pipeline does not already answer them.
-
-The resulting plan is presented and reviewed by the user before any conf write or code: it names
-the validation target, the judging method and rationale per criterion, the conf shape, cadence,
-scoring denominator, cold-start behavior, backfill range, and the pipeline insertion point. Only
-after approval is the conf created or replaced through the public API; registration is a setup
-action, never generated into the recurring pipeline code, and it must not happen before reuse and
-history analysis have settled the design. The stored conf is then read back and compared against
-the approved plan a second time — description, variable names and order, parameter names and
-values, and cadence. **The plan review and the conf review are distinct human gates and are never
-combined into one step.**
-
-Implementation and unit testing follow the second gate, then a single real partition is run and
-its result read back and compared against the pipeline's own log before a backfill proceeds,
-oldest to newest, relying on the bounded baseline reads (below) to stay safe against retries and
-repeat backfills. `plugin/skills/dataspoke-validation/references/validation-authoring.md` owns the
-per-step authoring detail, including the owner-question set, test coverage, and the backfill
-checklist.
-
-Registering a conf can make a watched `validation-score` metric look worse before it looks better:
-the dataset moves from unconfigured/unknown into the configured denominator, but only counts as
-`valid_in_time` once its single latest result overall lands inside the cadence-anchored window at
-`score >= 1.0` ([`feature/BACKEND.md` §Metrics Service](feature/BACKEND.md#metrics-service-srcbackendmetrics)
-— the metric never searches backward for an older qualifying row). A high-recall design compounds
-this: a sensitive check that fires on a genuine false alarm, and any criterion still inside its
-cold-start warm-up (below), both hold the dataset below `1.0` and therefore out of
-`valid_in_time` for as long as they do. The skill discloses both effects before the conf write
-rather than leaving them to be rediscovered as a governance surprise.
-
-### Data-first method selection
-
-There is no universal default check. The design starts from measured history and an open method
-set. The following vocabulary is illustrative, not a required classification:
-
-| Method | Suitable evidence | Earliest honest judgment |
-|---|---|---|
-| Invariant | A guarantee such as zero orphan rows or zero duplicate keys | First target, without history |
-| Forecast | A level whose expected range changes with time or calendar | After the chosen model's minimum history |
-| Relation | Measurements that should move together, such as a stable ratio | After enough paired observations |
-
-Stable candidate ranking — including weekday-adjusted residual spread where its mathematical
-preconditions hold — is one analysis technique among several for choosing a judging method.
-Prophet-based row-count forecasting is one forecast example chosen from measured history, not a
-starting proposal for an unexplored dataset. A recurring special day — a calendar or
-operating-regime day — receives an explicit modeled term once enough prior occurrences exist, and
-the plan exposes the resulting additional warm-up period. A volume criterion may be retained
-beside stable ratios because proportional loss can leave ratios unchanged.
-
-Each new validation implementation receives a unique, stable module code name before its first
-result. That name is a convention in the user's pipeline and the reuse catalogue, not DataSpoke
-result identity: DataSpoke keys the slot by dataset and collapses results by `data_time`. Renaming
-the module can still sever local reuse assumptions and the module's interpretation of its prior
-measurements, so it is treated as a versioning decision. The conf `description` identifies the
-module, the whole-dataset or settled-partition target, and the pass condition, using the form
-already visible in the deployment's live confs. Variable names and scoring semantics are likewise
-stable once results exist.
-
-Checks are isolated by default. Adding one does not extract a shared engine from an existing
-working check unless the user asks for that refactor separately; when they do, unchanged outputs
-from the existing check are an explicit acceptance condition.
-
-### Result and failure semantics
-
-The pipeline derives the total criterion count from the configured criterion groups. Every
-criterion contributes equally to the score unless the approved plan says otherwise, and the
-denominator is never a separately maintained constant. A criterion that cannot be judged counts
-as non-passing under the current score semantics. This makes cold start visible: history-free
-invariants may pass on the first target, while forecast, relation, or calendar-regime criteria
-remain breaches until their minimum evidence exists. The plan states the resulting score floors
-and the observation at which each layer can first pass.
-
-Historical baselines are time-bounded, not row-count-bounded. A read uses `from` for the intended
-lookback and `until=<data_time being judged>`; missing optional variable values in otherwise valid
-history reduce that variable's usable sample count rather than aborting the whole result. The
-routine posts the logical target time as `data_time`, never the execution timestamp: for a
-partition target this is the partition's own timestamp, and for a whole-dataset target it is the
-as-of boundary of the inspected snapshot on the dataset's declared cadence grid — never the run
-instant, which would make every run a distinct point and defeat baseline collapse. For a rewritten
-window, the scored partition named in the conf and the conf's `cadence_unit`/`cadence_offset` tell
-the same arrival story so Governance does not classify a deliberately older settled slice as
-stale.
-
-A score below `1.0` carries an optional `score_note` explaining the result, capped at 200
-characters by the API contract. Generated routines add stricter conventions on top of that cap —
-single-line plain text with no tab or newline, built from controlled criterion names, and safely
-truncated when a long breach list would not otherwise fit
-(`plugin/skills/dataspoke-validation/references/validation-conf.md` owns the exact construction
-rule). It is explanatory only, is not declared in the conf, and never affects scoring. A clean
-pass normally omits it.
-
-The routine distinguishes an expected inability to judge data from a software failure:
-
-| Condition | Pipeline-visible outcome |
-|---|---|
-| Valid computation, including expected insufficient evidence | Post the derived score; unjudgeable criteria count as non-passing and the note explains why |
-| Interrupted or unsuccessful result POST whose commit state is not authoritatively known | Read the bounded history for the exact `data_time` and compare the complete expected result before deciding whether to retry |
-| Contract/configuration rejection | Log an integration defect; do not fabricate a quality score |
-| Unexpected validation-code defect | Log a software defect; do not relabel it as a bad-data verdict |
-
-The public validation entry point contains these failures so the auxiliary check does not fail the
-data-production task, but containment never turns a programmer error into `0.0`. Conf registration
-before execution and the two review gates minimize the silent no-result cases. Result reads reflect
-DataSpoke's last-write-wins view for retries at the same `data_time`; a retry corrects that logical
-point without permitting it into its own baseline. A status code or transport interruption does
-not by itself establish whether a row landed unless the public contract explicitly says so. The
-reconciliation read uses a half-open range containing only the attempted `data_time` and compares
-`data_time`, `score`, the complete `variables` map, and `score_note`; a matching row is already
-delivered, while an absent or different row informs the retry decision.
+`plugin/skills/dataspoke-validation/references/validation-conf.md` owns the exact conf and result
+body contract, the `score_note` construction and truncation rule, the destructive-operation
+warnings (`DELETE` conf, `variables[]` rename), and the error table.
 
 ---
 

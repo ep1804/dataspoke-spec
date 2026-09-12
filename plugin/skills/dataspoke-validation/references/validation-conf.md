@@ -8,7 +8,7 @@ attr/validation/result` whenever this file and the deployment might have drifted
 
 ```json
 {
-  "description": "[TEAM_prophet_01] partition D-1 row_count · Prophet 95% interval on 112d history",
+  "description": "[TEAM_forecast_01] partition D-1 row_count within modeled interval (one example shape, not a default)",
   "variables": [{"name": "row_count", "description": "rows in the partition just written"}],
   "attribute": {"cadence_unit": 86400, "cadence_offset": 0},
   "parameter": [
