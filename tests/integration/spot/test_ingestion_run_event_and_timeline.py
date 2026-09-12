@@ -184,7 +184,7 @@ async def test_a_newer_observation_does_not_outrank_an_older_run_failure(
             async_session,
             entity_id=source,
             event_type="INGESTION.FAIL",
-            status="error",
+            status="failure",
             detail={"run_id": "run-fail-1", "platform": "postgres"},
             occurred_at=failed_at,
         )
@@ -212,7 +212,10 @@ async def test_a_newer_observation_does_not_outrank_an_older_run_failure(
             f"{latest['event_type']!r} at {latest['occurred_at']!r}. "
             "spec: feature/BACKEND.md §Sync + mapping sweep step 4."
         )
-        assert latest["status"] == "error"
+        assert latest["status"] == "failure", (
+            "the event vocabulary uses 'failure' (never the API-response 'error'). "
+            "spec: USE_CASE_en.md §UC1 — event_type/status vocabulary table."
+        )
         assert latest["occurred_at"] == failed_at
         assert latest["detail"]["run_id"] == "run-fail-1"
         assert latest["wrapper"] is False
@@ -305,7 +308,7 @@ async def test_a_newer_lifecycle_event_is_not_reported_as_a_run(
             async_session,
             entity_id=source,
             event_type="INGESTION.FAIL",
-            status="error",
+            status="failure",
             detail={"run_id": "run-fail-2", "platform": "postgres"},
             occurred_at=failed_at,
         )
@@ -759,7 +762,7 @@ async def test_an_unnarrowed_feed_still_shows_every_producer(
             async_session,
             entity_id=source,
             event_type="INGESTION.FAIL",
-            status="error",
+            status="failure",
             detail={"run_id": "run-unfiltered"},
             occurred_at=now - timedelta(minutes=15),
         )

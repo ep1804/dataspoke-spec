@@ -8,6 +8,7 @@ Covers:
 - list_active_sources_for_tier: mode + tier filter
 - list_datasets_for_source: propagates EntityNotFoundError on unknown source
 - get_source: raises EntityNotFoundError for non-existent ID
+- get_events_for_source: raises EntityNotFoundError on unknown source
 - _mirror_execution_requests: DataHub status → INGESTION_COMPLETE / INGESTION_FAIL /
   no-event mapping per spec/feature/BACKEND.md §Sync step 4 (Run events).
 
@@ -1405,6 +1406,62 @@ class TestDpiEmissionContract:
         assert len(complete_events) == 1, (
             "A failed run must still emit the terminal COMPLETE RunEvent. "
             "Spec: DATAHUB_INTEGRATION.md §Failure semantics."
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_run_books_the_fail_event_with_status_failure(
+        self, service: IngestionService, db: AsyncMock, datahub: AsyncMock
+    ) -> None:
+        """An extractor-returned-errors run books INGESTION.FAIL with status='failure'.
+
+        The event row's ``status`` uses the event vocabulary ('success'/'failure'),
+        never the API-response vocabulary ('success'/'error'): the two are related but
+        distinct fields, and a run that fails via extractor-reported errors (rather
+        than a zero-emit or a crash) is the path that previously leaked the response's
+        'error' literal into the event row.
+
+        Spec: USE_CASE_en.md §UC1 — 'Each event row carries an event_type
+        (INGESTION.COMPLETE on success, INGESTION.FAIL on failure) and a matching
+        status (success / failure)'.
+        """
+        from src.shared.events import INGESTION_FAIL
+
+        row = _make_source_row(mode="ACTIVE_CUSTOM_MANAGED")
+        mock_scalar_query(db, row)
+        recorded: list[tuple[str, str]] = []
+
+        async def _capture(source_id, event_type, status, detail):  # type: ignore[no-untyped-def]
+            recorded.append((event_type, status))
+
+        with (
+            _patched_run(
+                service,
+                emitted_urns=[_DATASET_URN],
+                errors=["extractor crawl failed"],
+            ),
+            patch.object(service, "_record_source_event", side_effect=_capture),
+        ):
+            result = await service._run_inner(str(row.id), dry_run=False, manual=True)
+
+        # Backstop: the response-vocabulary field is unchanged ('error', not 'failure') —
+        # this test guards the event row only, not this field.
+        assert result.status == "error", (
+            f"backstop: the API-response status field's vocabulary is unchanged; got "
+            f"{result.status!r}."
+        )
+        assert len(recorded) == 1, (
+            f"backstop — the failed run must have booked exactly one event; got "
+            f"{len(recorded)}."
+        )
+        event_type, status = recorded[0]
+        assert event_type == INGESTION_FAIL, (
+            f"a run with extractor-reported errors must book {INGESTION_FAIL!r}; "
+            f"got {event_type!r}."
+        )
+        assert status == "failure", (
+            f"the INGESTION.FAIL event row must use status='failure' (the event "
+            f"vocabulary), not {status!r}. spec: USE_CASE_en.md §UC1 — event_type/"
+            "status vocabulary table."
         )
 
     @pytest.mark.asyncio
@@ -3265,6 +3322,33 @@ class TestStepFourFoldsEachSubPassIntoItsCounter:
             f"{summary['last_ingested_observed']}. "
             "spec: feature/BACKEND.md §Sync + mapping sweep — Sweep summary."
         )
+
+
+# ── get_events_for_source: unknown source existence check ────────────────────
+
+
+class TestGetEventsForSourceUnknownSource:
+    """``get_events_for_source`` raises EntityNotFoundError for an unknown source id.
+
+    Mirrors ``TestListDatasetsForSource``'s sibling check: the router's own docstring
+    ('Returns 404 INGESTION_SOURCE_NOT_FOUND when the id is absent') requires the
+    service to check existence before querying events, matching
+    ``list_datasets_for_source``'s existence-check-then-query shape.
+
+    Spec: BACKEND.md §Ingestion Service — 'raises if not found'.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unknown_source_raises_entity_not_found(
+        self, service: IngestionService, db: AsyncMock
+    ) -> None:
+        """get_events_for_source raises EntityNotFoundError for an unknown source id.
+
+        Spec: BACKEND.md §Ingestion Service — 'raises if not found'.
+        """
+        mock_scalar_query(db, None)
+        with pytest.raises(EntityNotFoundError):
+            await service.get_events_for_source(str(uuid.uuid4()))
 
 
 # ── get_events_for_source: dataset_urn is keyword-only ────────────────────────
