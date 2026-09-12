@@ -1671,6 +1671,11 @@ class IngestionService:
 
         Raises:
             EntityNotFoundError('ingestion_source', source_id): if source not found.
+                This also applies to a *deleted* source: once its
+                ``ingestion_source`` row is gone, this is the only reader of
+                its retained event rows, so the 404 makes that source's full
+                event history — including its own ``INGESTION.SOURCE_DELETE``
+                audit event — permanently unreachable through the API.
         """
         await self.get_source(source_id)  # raises if not found
         canonical, entity_ids = await self._source_entity_ids(source_id)
