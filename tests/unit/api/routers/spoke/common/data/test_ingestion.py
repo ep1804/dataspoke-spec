@@ -385,9 +385,12 @@ async def test_event_ingestion_falls_back_to_empty_when_source_vanishes_mid_requ
     must fall back to the same empty-events response used when no source covers the
     dataset at all, not leak an ingestion-source-specific 404 onto a dataset route.
 
-    Spec: feature/BACKEND.md §Querying Events — the per-dataset timeline is the dataset's
-      "complete … feed"; a source disappearing mid-request narrows evidence, it does not
-      turn the dataset itself into a 404.
+    This route is the domain-level filtered endpoint (``GET .../data/{urn}/event/ingestion``),
+    which feature/BACKEND.md §Querying Events describes only as filtering by ``event_type``
+    prefix to return one domain's events — it says nothing about a covering source
+    vanishing mid-request. That fallback (degrade to the empty-events shape rather than
+    propagate the source's own not-found) is an impl decision pinned by this test, not a
+    spec-derived rule.
     """
     source_id = str(uuid.uuid4())
     mock_svc.reverse_lookup = AsyncMock(return_value=_mapped_source(source_id))

@@ -1409,22 +1409,53 @@ class TestDpiEmissionContract:
         )
 
     @pytest.mark.asyncio
-    async def test_failed_run_books_the_fail_event_with_status_failure(
-        self, service: IngestionService, db: AsyncMock, datahub: AsyncMock
+    @pytest.mark.parametrize(
+        ("errors", "expected_response_status", "expected_event_type", "expected_event_status"),
+        [
+            pytest.param(
+                ["extractor crawl failed"],
+                "error",
+                "INGESTION_FAIL",
+                "failure",
+                id="errors-books-fail-with-failure",
+            ),
+            pytest.param(
+                [],
+                "success",
+                "INGESTION_COMPLETE",
+                "success",
+                id="no-errors-books-complete-with-success",
+            ),
+        ],
+    )
+    async def test_run_inner_books_a_matching_event_type_and_status(
+        self,
+        service: IngestionService,
+        db: AsyncMock,
+        datahub: AsyncMock,
+        errors: list[str],
+        expected_response_status: str,
+        expected_event_type: str,
+        expected_event_status: str,
     ) -> None:
-        """An extractor-returned-errors run books INGESTION.FAIL with status='failure'.
+        """_run_inner books an event whose type and status agree with each other.
 
         The event row's ``status`` uses the event vocabulary ('success'/'failure'),
         never the API-response vocabulary ('success'/'error'): the two are related but
-        distinct fields, and a run that fails via extractor-reported errors (rather
-        than a zero-emit or a crash) is the path that previously leaked the response's
-        'error' literal into the event row.
+        distinct fields. Both legs of the rule are pinned here so a regression that
+        hardcodes either field (e.g. always 'failure', or always INGESTION.FAIL)
+        fails at the always-run unit tier rather than surviving to api-wired.
 
         Spec: USE_CASE_en.md §UC1 — 'Each event row carries an event_type
         (INGESTION.COMPLETE on success, INGESTION.FAIL on failure) and a matching
         status (success / failure)'.
         """
-        from src.shared.events import INGESTION_FAIL
+        from src.shared.events import INGESTION_COMPLETE, INGESTION_FAIL
+
+        expected_event_type_value = {
+            "INGESTION_FAIL": INGESTION_FAIL,
+            "INGESTION_COMPLETE": INGESTION_COMPLETE,
+        }[expected_event_type]
 
         row = _make_source_row(mode="ACTIVE_CUSTOM_MANAGED")
         mock_scalar_query(db, row)
@@ -1437,31 +1468,30 @@ class TestDpiEmissionContract:
             _patched_run(
                 service,
                 emitted_urns=[_DATASET_URN],
-                errors=["extractor crawl failed"],
+                errors=errors,
             ),
             patch.object(service, "_record_source_event", side_effect=_capture),
         ):
             result = await service._run_inner(str(row.id), dry_run=False, manual=True)
 
-        # Backstop: the response-vocabulary field is unchanged ('error', not 'failure') —
-        # this test guards the event row only, not this field.
-        assert result.status == "error", (
-            f"backstop: the API-response status field's vocabulary is unchanged; got "
-            f"{result.status!r}."
+        # Backstop: the response-vocabulary field takes the value this leg expects —
+        # this test guards the event row primarily, but checks the response field stays
+        # aligned to the same leg rather than drifting independently.
+        assert result.status == expected_response_status, (
+            f"backstop: the API-response status field for this leg is "
+            f"{expected_response_status!r}; got {result.status!r}."
         )
         assert len(recorded) == 1, (
-            f"backstop — the failed run must have booked exactly one event; got "
-            f"{len(recorded)}."
+            f"backstop — the run must have booked exactly one event; got {len(recorded)}."
         )
         event_type, status = recorded[0]
-        assert event_type == INGESTION_FAIL, (
-            f"a run with extractor-reported errors must book {INGESTION_FAIL!r}; "
-            f"got {event_type!r}."
+        assert event_type == expected_event_type_value, (
+            f"this leg must book {expected_event_type_value!r}; got {event_type!r}."
         )
-        assert status == "failure", (
-            f"the INGESTION.FAIL event row must use status='failure' (the event "
-            f"vocabulary), not {status!r}. spec: USE_CASE_en.md §UC1 — event_type/"
-            "status vocabulary table."
+        assert status == expected_event_status, (
+            f"the {expected_event_type_value!r} event row must use "
+            f"status={expected_event_status!r} (the event vocabulary), not {status!r}. "
+            "spec: USE_CASE_en.md §UC1 — event_type/status vocabulary table."
         )
 
     @pytest.mark.asyncio
@@ -3330,12 +3360,15 @@ class TestStepFourFoldsEachSubPassIntoItsCounter:
 class TestGetEventsForSourceUnknownSource:
     """``get_events_for_source`` raises EntityNotFoundError for an unknown source id.
 
-    Mirrors ``TestListDatasetsForSource``'s sibling check: the router's own docstring
-    ('Returns 404 INGESTION_SOURCE_NOT_FOUND when the id is absent') requires the
-    service to check existence before querying events, matching
-    ``list_datasets_for_source``'s existence-check-then-query shape.
+    The 404 this backs is spec'd at the API level, not the service level: API.md's
+    Error Catalogue defines ``INGESTION_SOURCE_NOT_FOUND`` for exactly this id, and the
+    sibling router test (``test_get_source_event_unknown_source_returns_404``) cites the
+    same anchor for the resulting response. This test pins the service-layer half of
+    that contract — the ``EntityNotFoundError`` the router depends on the service raising
+    before it can translate to that status/error_code.
 
-    Spec: BACKEND.md §Ingestion Service — 'raises if not found'.
+    Spec: API.md §Error Catalogue → Application Error Codes — "INGESTION_SOURCE_NOT_FOUND
+    | 404 | Ingestion source id does not exist".
     """
 
     @pytest.mark.asyncio
@@ -3344,7 +3377,8 @@ class TestGetEventsForSourceUnknownSource:
     ) -> None:
         """get_events_for_source raises EntityNotFoundError for an unknown source id.
 
-        Spec: BACKEND.md §Ingestion Service — 'raises if not found'.
+        Spec: API.md §Error Catalogue → Application Error Codes —
+        "INGESTION_SOURCE_NOT_FOUND | 404 | Ingestion source id does not exist".
         """
         mock_scalar_query(db, None)
         with pytest.raises(EntityNotFoundError):

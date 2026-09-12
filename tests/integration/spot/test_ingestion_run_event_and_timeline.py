@@ -213,7 +213,12 @@ async def test_a_newer_observation_does_not_outrank_an_older_run_failure(
             "spec: feature/BACKEND.md §Sync + mapping sweep step 4."
         )
         assert latest["status"] == "failure", (
-            "the event vocabulary uses 'failure' (never the API-response 'error'). "
+            "the latest run-level row for this source is the seeded FAIL, carried "
+            "through with its seeded status intact (this is a seed-then-read round "
+            "trip, not evidence of what a writer emits — the writer-side vocabulary "
+            "('failure', never the API-response 'error') is pinned by the unit test "
+            "test_run_inner_books_a_matching_event_type_and_status"
+            "[errors-books-fail-with-failure]). "
             "spec: USE_CASE_en.md §UC1 — event_type/status vocabulary table."
         )
         assert latest["occurred_at"] == failed_at

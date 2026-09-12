@@ -316,9 +316,12 @@ async def test_get_events_source_vanishes_mid_request_falls_back_to_dataset_only
     fall back exactly like the "no covering source" case rather than propagating the
     ingestion-source-specific not-found.
 
-    Spec: feature/BACKEND.md §Querying Events — the per-dataset timeline is the
-      dataset's "complete … feed"; a source disappearing mid-request narrows evidence,
-      it does not turn the dataset itself into a 404.
+    Spec: feature/BACKEND.md §Querying Events states only that the per-dataset timeline
+      is the dataset's "complete … dataset feed", unioning dataset-level events with the
+      covering source's ingestion runs — it does not say what happens if that source
+      disappears mid-request. The TOCTOU fallback itself (degrade to dataset-only rather
+      than propagate the source's own not-found) is an impl decision, not a spec rule;
+      this test pins that impl behaviour rather than a spec citation.
     """
     dataset_rows = [
         make_event_row(
