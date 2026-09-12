@@ -114,12 +114,6 @@ finalize_issue_pr() {
   fi
 }
 
-# Backwards-compatible entry point for callers that need the post-PR gate.
-run_and_post_test_results() {
-  local branch="$1"
-  run_post_pr_regression "${CURRENT_ISSUE_NUMBER:-}" "$branch"
-}
-
 # env_file_value <file> <key>
 # Read a single value from an env file without sourcing it (sourcing would
 # execute the file and export every key). Prints the value, quotes stripped.
@@ -756,7 +750,10 @@ classify_deploy_failure() {
   # diagnostics is branch-attributable. Registry, Helm, resource, rollout, or
   # unknown failures are infrastructure until a human can diagnose them.
   DEPLOY_FAILURE_KIND="infrastructure"
-  if printf '%s' "$deploy_output" | grep -Eqi 'failed to solve.*(Dockerfile|COPY|RUN)|Dockerfile.*(error|failed)|(^|[^[:alpha:]])(tsc|typescript|eslint|mypy|ruff)[^[:alpha:]].*(error|failed)|chart.*(schema|validation).*(error|failed)|values.*(invalid|required|must be)|template.*(executing|error).*\.yaml'; then
+  # Helm's own schema-validation wording puts "schema" before "chart" (e.g.
+  # "values don't meet the specifications of the schema(s) in the following
+  # chart(s):"), so both orders are matched.
+  if printf '%s' "$deploy_output" | grep -Eqi 'failed to solve.*(Dockerfile|COPY|RUN)|Dockerfile.*(error|failed)|(^|[^[:alpha:]])(tsc|typescript|eslint|mypy|ruff)[^[:alpha:]].*(error|failed)|chart.*(schema|validation)|(schema|validation).*chart|values.*(invalid|required|must be)|template.*(executing|error).*\.yaml'; then
     DEPLOY_FAILURE_KIND="branch"
   fi
 }

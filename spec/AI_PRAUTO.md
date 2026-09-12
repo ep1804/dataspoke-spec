@@ -630,7 +630,9 @@ A branch-attributable static, unit, spot, api-wired, E2E, or branch-deploy failu
 of `prauto:review`; before starting the applicable generator/reviewer fix workflow, the executor
 posts one brief PR failure comment naming the failed stage and stating that the agents will fix it
 and rerun full regression. A fix is committed and pushed before the entire required full regression
-reruns; each resulting exact-head pass posts the brief success comment again. A provisioning,
+reruns; each resulting exact-head pass posts the brief success comment again. The fix-rerun loop is
+bounded by `PRAUTO_REGRESSION_FIX_MAX_RETRIES` (default `2`); exhausting it leaves the PR in
+`prauto:wip` rather than looping forever. A provisioning,
 health-check, lock, or local setup failure is infrastructure-blocked: the executor posts a distinct
 brief blocked comment, leaves the issue and PR in `prauto:wip`, and retries the same regression on
 a later heartbeat without promising a code fix or asking a worker to change code. Only a passing

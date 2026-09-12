@@ -111,6 +111,26 @@ if ! select_agent; then
 fi
 info "Agent selected: ${ACTIVE_AGENT}."
 
+# A rejected/malformed Codex model+effort override is a configuration/account-
+# compatibility failure, not a work-item failure: halt before any retry is
+# counted or any issue is claimed, and post diagnostic evidence on every
+# claimed WIP issue so it is never silently absorbed into a retry.
+if [[ "$ACTIVE_AGENT" == "codex" ]] && ! validate_codex_override; then
+  warn "Codex model/effort override is invalid. No dispatch this wake."
+  if find_all_claimed_issues; then
+    qi=0
+    while [[ "$qi" -lt "$ALL_CLAIMED_COUNT" ]]; do
+      q_labels=$(printf '%s' "$ALL_CLAIMED_ISSUES" | jq ".[$qi].labels | map(.name)")
+      if labels_contain "$q_labels" "$PRAUTO_GITHUB_LABEL_WIP"; then
+        q_issue=$(printf '%s' "$ALL_CLAIMED_ISSUES" | jq -r ".[$qi].number")
+        post_codex_override_invalid_comment "$q_issue"
+      fi
+      qi=$((qi + 1))
+    done
+  fi
+  exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # Step 4: claim new work (if under the open-issue limit)
 # ---------------------------------------------------------------------------
@@ -196,6 +216,12 @@ if [[ "${ALL_CLAIMED_COUNT:-0}" -gt 0 ]]; then
           # agent (under `auto`, codex takes over if the paused agent is down).
           if ! select_agent; then
             warn "No agent available for the restart of #${CUR_ISSUE_NUMBER}. Will retry next wake."
+            pending_claimed_count=$((pending_claimed_count + 1))
+            claim_i=$((claim_i + 1)); continue
+          fi
+          if [[ "$ACTIVE_AGENT" == "codex" ]] && ! validate_codex_override; then
+            warn "Codex model/effort override is invalid; cannot restart #${CUR_ISSUE_NUMBER} on Codex this wake."
+            post_codex_override_invalid_comment "$CUR_ISSUE_NUMBER"
             pending_claimed_count=$((pending_claimed_count + 1))
             claim_i=$((claim_i + 1)); continue
           fi

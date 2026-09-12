@@ -68,6 +68,18 @@ validate_codex_override() {
   return 0
 }
 
+# post_codex_override_invalid_comment <issue_number>
+# Diagnostic evidence for a rejected/malformed PRAUTO_CODEX_MODEL/PRAUTO_CODEX_EFFORT
+# override (see validate_codex_override). This is a configuration/account-
+# compatibility failure, not a work-item failure: the issue is left exactly as
+# it was, no worker starts, and no retry is burned.
+post_codex_override_invalid_comment() {
+  local issue_number="$1"
+  gh issue comment "$issue_number" -R "$PRAUTO_GITHUB_REPO" \
+    --body "prauto(${PRAUTO_WORKER_ID}): Codex model/effort override is invalid or unsupported (PRAUTO_CODEX_MODEL='${PRAUTO_CODEX_MODEL:-}', PRAUTO_CODEX_EFFORT='${PRAUTO_CODEX_EFFORT:-}'). Fix the override in this worker's configuration; the issue is left unchanged and will be retried on a later heartbeat once resolved." \
+    2>/dev/null || warn "Failed to post Codex-override-invalid comment on issue #${issue_number}."
+}
+
 # select_agent — probe per PRAUTO_AGENT and set ACTIVE_AGENT.
 #   claude -> probe claude only; codex -> codex only; auto -> claude then codex.
 # Returns 0 (and sets ACTIVE_AGENT) or 1 if neither agent is available.
